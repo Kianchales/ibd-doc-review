@@ -32,6 +32,15 @@ HEADING_STYLES = set(OUTLINE.keys())
 # 样式库模式：styles.xml 应包含的样式 ID
 LIBRARY = ["000", "001", "002", "003", "004", "005", "006", "007", "008", "009", "a4", "a5", "a6"]
 LIBRARY_EXTRA = {"反馈回复": ["0011", "001"]}
+# 序号开头段落判定（2026-08-25 双维度算法）：序号前缀模式
+# 注意：半角点须后跟空白（区分 "1. 标题" 与 "78.50" 小数）；表格内数字另行排除
+NUMBER_PAT = re.compile(
+    r"^[（(]\s*[一二三四五六七八九十百\d]+\s*[）)]"   # （一）（1）(一)(1)
+    r"|^\d+\s*[、．]"                                # 1、1．
+    r"|^\d+\.\s"                                    # 1. 标题（半角点+空白）
+    r"|^[①-⑳]"                                      # ①-⑳
+    r"|^[A-Za-z]\s*[、．.]"                          # A、a．a.
+)
 
 
 def resolve_files(path):
@@ -169,6 +178,61 @@ def extract_text(docx_path):
     return [m.group(1) for m in re.finditer(r"<w:t[^>]*>([^<]*)</w:t>", doc) if m.group(1)]
 
 
+def check_numbering(docx_path):
+    """序号段落核对（2026-08-25 双维度算法辅助）：列出所有序号开头段落及上下文，
+    供按 rules.md 判定「标题 vs 正文」：
+      情况1（标题）：序号段短 + 后段独立正文展开 → 序号段用标题样式，后段 000
+      情况2（列举正文）：序号段长 + 后段连续序号/无后段 → 序号段本身用 000
+    输出为核对清单（WARN 级别，需人工按上下文定夺，不自动 FAIL）。"""
+    print(f"\n=== 序号段落核对（{os.path.basename(docx_path)}）===")
+    xmls = load_docx(docx_path)
+    if not xmls or "word/document.xml" not in xmls:
+        print("  [ERROR] 非标准 docx（无 word/document.xml）")
+        return False
+    doc = xmls["word/document.xml"]
+
+    # 排除表格内段落（表格内容非文档序号结构，且数字/百分比易误配）
+    table_p_offsets = set()
+    for tc in re.finditer(r"<w:tc\b[^>]*>.*?</w:tc>", doc, re.S):
+        for pm in re.finditer(r"<w:p\b", tc.group(0)):
+            table_p_offsets.add(tc.start() + pm.start())
+
+    paras = []
+    for m in re.finditer(r"<w:p\b[^>]*>(.*?)</w:p>", doc, re.S):
+        body = m.group(1)
+        st = re.search(r'<w:pStyle w:val="([^"]+)"', body)
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body)).strip()
+        paras.append((st.group(1) if st else None, text, m.start() in table_p_offsets))
+
+    hits = []
+    for i, (style, text, in_table) in enumerate(paras):
+        if in_table:
+            continue
+        if text and NUMBER_PAT.match(text):
+            hits.append((i, style, text))
+
+    if not hits:
+        print("  [INFO] 未发现序号开头段落（（一）/1、/（1）/① 等）")
+        return True
+
+    print(f"  共 {len(hits)} 个序号开头段落（按双维度算法核对：长短 + 后段是否分段）:")
+    print("  # | 样式 | 字数 | 序号段落(前24字) | 后段(前24字) | 倾向")
+    for idx, (i, style, text) in enumerate(hits, 1):
+        nxt = paras[i + 1][1] if i + 1 < len(paras) else ""
+        nxt_is_num = bool(nxt and NUMBER_PAT.match(nxt))
+        short = len(text) <= 40
+        if not nxt:
+            lean = "情况2:列举正文(无后段)" if not short else "短句无后段→倾向正文"
+        elif nxt_is_num:
+            lean = "情况2:列举正文(后段连续序号)" if not short else "短句+连续序号→倾向正文"
+        else:
+            lean = "情况1:标题+展开(后段独立正文)" if short else "长句+后段展开→上下文主判,按分段定"
+        style_s = style if style else "(裸)"
+        print(f"  {idx:2d} | {style_s:6s} | {len(text):3d} | {text[:24]} | {nxt[:24]} | {lean}")
+    print("  [HINT] 判定主判据=上下文是否分段；长短为辅助。详见 rules.md「序号段落判定」。")
+    return True
+
+
 def verify_content(docx_path, original_path):
     """内容完整性检查（2026-08-25 用户裁定：只改格式、严禁修改原文内容）。
     套样式后的文本必须与原文逐字一致（含表格内文字、标点、空格、数字）。"""
@@ -203,6 +267,8 @@ def main():
                     help="document=成品文档校验（默认）；template=样式库完整性校验")
     ap.add_argument("--verify-content", metavar="原文.docx", default=None,
                     help="内容完整性校验：对比 --input 与原文文本是否逐字一致（严禁修改原文内容）")
+    ap.add_argument("--check-numbering", action="store_true",
+                    help="序号段落核对：列出序号开头段落（（一）/1、/（1）/①）及上下文，辅助判定标题 vs 正文")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -210,6 +276,11 @@ def main():
     if not files:
         print(f"[ERROR] 未找到 docx: {args.input}")
         sys.exit(1)
+
+    if args.check_numbering:
+        all_ok = all(check_numbering(f) for f in files)
+        print(f"\n{'序号段落核对完成 ✅' if all_ok else '核对异常 ❌'}")
+        sys.exit(0 if all_ok else 2)
 
     if args.verify_content:
         orig_files = resolve_files(args.verify_content)

@@ -65,6 +65,13 @@ def run_verify(new_path, orig_path):
     return proc.returncode, proc.stdout
 
 
+def run_numbering(path):
+    """序号段落核对（2026-08-25 双维度算法辅助）。"""
+    cmd = [sys.executable, SCRIPT, "--input", path, "--check-numbering"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, proc.stdout
+
+
 class TestCheckStyles(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -165,6 +172,44 @@ class TestCheckStyles(unittest.TestCase):
         code, out = run_verify(path, self.good)
         self.assertNotEqual(code, 0, "篡改内容应失败")
         self.assertIn("[FAIL]", out)
+
+    def test_numbering_case1_and_case2(self):
+        """序号段落核对（2026-08-25 双维度算法）：情况1 标题+展开 vs 情况2 列举正文。"""
+        # 情况1：短标题（一）后跟独立正文；情况2：长句 1、2、3、连续序号列举
+        body_paras = [
+            ("003", "（一）营业收入构成分析"),
+            ("000", "发行人营业收入按产品类别划分，具体情况如下："),
+            ("000", "1、精密焊接设备收入占比最高，报告期内分别为 72.00%、76.00% 和 78.50%，系发行人核心收入来源，客户结构稳定。"),
+            ("000", "2、自动化装配线收入占比逐年提升，报告期内分别为 13.50%、12.80% 和 11.80%，订单金额及交付规模持续增长。"),
+            ("000", "3、配套软件及运维服务收入占比相对稳定，报告期内维持在 10% 左右，毛利率较高。"),
+        ]
+        path = os.path.join(self.tmp, "numbering.docx")
+        make_mini_docx(path, body_paras)
+        code, out = run_numbering(path)
+        self.assertEqual(code, 0, f"序号核对应正常，输出:\n{out}")
+        self.assertIn("情况1:标题+展开", out, "（一）短标题+后段展开应为情况1")
+        self.assertIn("情况2:列举正文", out, "1、2、3 长句连续序号应为情况2")
+
+    def test_numbering_ignores_table_numbers(self):
+        """序号核对：表格内数字/百分比不应被当作序号段落（修复回归）。"""
+        # 表格内 78.50% 等数字不应进入序号核对
+        body = (
+            '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>78.50%</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+            '<w:p><w:pPr><w:pStyle w:val="000"/></w:pPr><w:r><w:t>正文段落</w:t></w:r></w:p>'
+        )
+        path = os.path.join(self.tmp, "num_table.docx")
+        with zipfile.ZipFile(self.good) as z:
+            ct = z.read("[Content_Types].xml")
+            rels = z.read("_rels/.rels")
+            doc = z.read("word/document.xml").decode("utf-8")
+        doc = doc.replace("<w:body>", f"<w:body>{body}", 1)
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", ct)
+            z.writestr("_rels/.rels", rels)
+            z.writestr("word/document.xml", doc)
+        code, out = run_numbering(path)
+        self.assertEqual(code, 0, f"序号核对应正常，输出:\n{out}")
+        self.assertIn("未发现序号开头段落", out, "表格内百分比不应被识别为序号段落")
 
 
 if __name__ == "__main__":
