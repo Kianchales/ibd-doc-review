@@ -27,6 +27,14 @@ A股 IPO 文档样式应用 Skill —— 在写 Word 或改 Word 文件时，按
 
 > 安装后技能即自动可用，无需额外配置（校验脚本零依赖）。
 
+## 版本
+
+当前版本 **v0.3.0**（frontmatter `version` 为准；完整演进见 `CHANGELOG.md`）。
+
+- **版本规则**：功能/结构变更 bump minor（0.2.0→0.3.0）；规则裁定/缺陷修复 bump patch（0.3.0→0.3.1）
+- **发布标识**：git tag `vX.Y.Z`；模板 docx 更新在 CHANGELOG 对应版本下留痕，不单独 bump
+- 想固定某个版本使用时，checkout 对应 tag 或下载对应 release
+
 ## 使用流程（S1-S7）
 
 ```
