@@ -36,6 +36,7 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 
 > 模板文件路径（**skill 自带，即样式源**）：`assets/templates/`（相对本 skill 目录）
 > **模板即样式源（2026-08-25 共享化改造）**：使用者可直接修改/替换 `assets/templates/` 下的 docx——**改模板 = 定制输出样式**，输出将跟随新模板。
+> **skillhub 分发版说明**：skillhub 平台不接受 .docx，模板以 `assets/templates/模板包.zip` 提供——首次使用前解压该 zip 到同目录（含 报告模板.docx / 反馈回复样式.docx / 表格模板.docx）；完整模板亦可从 GitHub 获取：`git clone https://github.com/Kianchales/ipo-doc-formatting`
 > 原权威源（专家团资产，模板更新时以权威源为准回同步）：`C:/Users/Kian_/.workbuddy/plugins/marketplaces/my-experts/plugins/ipo-doc-team/references/templates/`
 
 | 模板文件 | 适用文档 | 样式体系 | 关键样式 ID |

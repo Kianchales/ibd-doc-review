@@ -65,6 +65,8 @@ python scripts/check_styles.py --input 你的模板.docx --scenario 反馈回复
 
 **自定义方式**：用 Word 打开对应模板 docx，修改样式（如把 000 正文字号改成小五、把标题颜色改成深蓝），保存后重新运行校验——输出将自动跟随新模板。样式 ID 与文档段落映射见 `references/style-map.md`。
 
+> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，模板 docx 由 GitHub 仓库提供——`git clone https://github.com/Kianchales/ipo-doc-formatting` 获取完整版，或从仓库下载 `assets/templates/` 下 3 个模板 docx 放入本 skill 同目录。本仓库（GitHub 版）自带完整模板，开箱即用。
+
 ## 目录结构
 
 ```
