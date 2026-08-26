@@ -12,7 +12,7 @@ description: >
   「反馈回复排版」「落实函格式」「套用 000-009 样式」「报告模板样式」「套模板样式」
   「把这个 Word 改成XXX格式」「按投行规范排版」「排版规范」。
 agent_created: true
-version: 0.4.2
+version: 0.4.3
 ---
 
 # ipo-doc-formatting
