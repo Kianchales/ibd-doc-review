@@ -12,7 +12,7 @@ description: >
   「反馈回复排版」「落实函格式」「套用 000-009 样式」「报告模板样式」「套模板样式」
   「把这个 Word 改成XXX格式」「按投行规范排版」「排版规范」。
 agent_created: true
-version: 0.4.1
+version: 0.4.2
 ---
 
 # ipo-doc-formatting
@@ -30,14 +30,14 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 | 通用排版要求 | 「把这个 Word 改成 XXX 格式」「排版规范」「按投行规范排版」「字体字号统一」「排版规范一点」「文档格式统一」 |
 | 局部样式调整 | 「标题改成黑体」「正文首行缩进」「表格改成三线表」「单位行右对齐」 |
 
-> 若任务同时含「写反馈回复内容」→ 内容方法论走 `ipo-write-response`，本 skill 只负责生成后的样式落地；两者可串联（先写内容、再套样式）。
+> 若任务同时含「写反馈回复内容」→ 内容写作属内容层任务（由其他内容生成流程处理），本 skill 只负责生成后的样式落地；两者可串联（先写内容、再套样式）。
 > 典型用例（触发→执行→产出 全链路示例）见 `references/examples.md`。
 
 ## 样式资产索引（先加载，禁止裸写）
 
 > 模板文件路径（**skill 自带，即样式源**）：`assets/templates/`（相对本 skill 目录）
 > **模板即样式源（2026-08-25 共享化改造）**：使用者可直接修改/替换 `assets/templates/` 下的 docx——**改模板 = 定制输出样式**，输出将跟随新模板。
-> **skillhub 分发版说明**：skillhub 平台不接受 .docx，模板以 `assets/templates/模板包.zip` 提供——首次使用前解压该 zip 到同目录（含 报告模板.docx / 反馈回复样式.docx / 表格模板.docx）；完整模板亦可从 GitHub 获取：`git clone https://github.com/Kianchales/ipo-doc-formatting`
+> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，分发版不含模板文件——模板经 GitHub 仓库获取：`git clone https://github.com/Kianchales/ipo-doc-formatting`（完整版含 `assets/templates/` 三个模板 docx）
 > 模板权威源为机构内部资产（不随分发包携带）；分发版以包内 `assets/templates/` 为使用源，样式定义以包内模板 + style-map.md/rules.md 为准。
 
 | 模板文件 | 适用文档 | 样式体系 | 关键样式 ID |
@@ -132,7 +132,7 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 - 样式未全覆盖处列出清单（哪些段落待人工复核）
 ## 样式应用铁律
 
-0. **只改格式、严禁修改原文内容（2026-08-25 用户裁定，最高优先级）**：本 skill 只做样式应用（pStyle/字体/字号/对齐/缩进/间距/边框），**不得增、删、改、移任何文字内容**（含表格内文字、标点、空格、数字、单位）。套用样式后必须用 `check_styles.py --verify-content <原文件>` 校验内容完整性——文本与原文逐字不一致即 FAIL，打回重做，不交付。内容修改（如补数据、改措辞）属内容层任务，走 `ipo-write-response` 等，本 skill 一律不做。
+0. **只改格式、严禁修改原文内容（2026-08-25 用户裁定，最高优先级）**：本 skill 只做样式应用（pStyle/字体/字号/对齐/缩进/间距/边框），**不得增、删、改、移任何文字内容**（含表格内文字、标点、空格、数字、单位）。套用样式后必须用 `check_styles.py --verify-content <原文件>` 校验内容完整性——文本与原文逐字不一致即 FAIL，打回重做，不交付。内容修改（如补数据、改措辞）属内容层任务，本 skill 一律不做。
 1. **模板先行**：任何文档动笔前先确认模板 docx 存在（`assets/templates/`），优先以模板为基底（保留 styles.xml 样式表）；**模板即样式源，使用者替换模板即定制输出样式**
 2. **pStyle 优先于手写格式**：能应用命名样式（000-009/0011/001）就不用直接格式（字体/字号硬编码），保证全文一致性与后续批量修改能力
 3. **序号段落判定：标题 vs 正文（2026-08-25 双维度算法）**："1、""（1）""1）""①"开头的段落可能是标题也可能是正文——按 `rules.md` 双维度判定：**段落长短**（≤40 字短语式→标题倾向；>40 字完整句→正文倾向）+ **上下文分段**（主判据：后段独立正文展开→情况1 标题；后段连续序号/无后段→情况2 列举正文）。可 `check_styles.py --check-numbering` 输出序号段落清单辅助核对
@@ -145,22 +145,3 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 - **中文文件名编码**：Git Bash 向 Python/minimax CLI 传中文文件名参数可能乱码（zipfile 读 报告模板.docx 曾报 "No such item"）→ 优先用 Python `glob.glob`/`os.listdir` 遍历目录取文件，或复制为临时英文文件名再处理
 - **minimax-docx 环境**：restore 必须用 csproj（.slnx 不支持 dotnet 8）；依赖华为云 NuGet 镜像
 - **apply-template 语义**：把模板样式套到源文件（保留源内容换样式），不是以模板内容为基底——新建场景用 create，套用场景用 apply-template，勿混淆
-
-## 维护与更新
-
-| 变化类型 | 需要改 skill？ | 动作 |
-|---------|---------------|------|
-| 模板 docx 更新（样式调整） | ⚠️ 视情况 | 同步更新 `references/style-map.md` 对应样式定义 + CHANGELOG 留痕 |
-| 工具链变化（minimax/tencent 升级） | ✅ 改 | 更新「工具路由」章节 |
-| 新增文档类型样式 | ✅ 改 | 新增场景行 + style-map 样式表 |
-| 序号/表格规则裁定变化 | ✅ 改 | 更新 `references/rules.md` |
-
-**版本管理（2026-08-25 固化）**：
-- 版本号规则：**功能/结构变更 bump minor（0.2.0→0.3.0），规则裁定/缺陷修复 bump patch（0.3.0→0.3.1）**；模板 docx 更新在 CHANGELOG 对应版本下记录，不单独 bump
-- 每次变更同步更新 `CHANGELOG.md`（Keep a Changelog 风格：新增/修正/模板留痕/测试 分类）
-- 发布时打 git tag `vX.Y.Z`；当前版本见 frontmatter `version`
-
-**发布前隐私检查（2026-08-26 强制，v0.4.0 泄露事故教训）**：
-- 发布（GitHub Release / skillhub / 任何分发）前必须扫描：`grep -rn "C:/Users\|C:\\\\Users\|\.workbuddy\|marketplaces\|ipo-doc-team\|Kian_" <skill目录>`——**分发包内不得出现任何本机绝对路径、内部插件结构、用户名**
-- 允许保留：`~` 用户目录通配符（安装指引）、GitHub 公开仓库 URL（非隐私）
-- 内部同步说明（权威源位置等）如涉及本机路径，须泛化表述或移出分发内容
