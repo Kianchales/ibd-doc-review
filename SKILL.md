@@ -12,7 +12,7 @@ description: >
   「反馈回复排版」「落实函格式」「套用 000-009 样式」「报告模板样式」「套模板样式」
   「把这个 Word 改成XXX格式」「按投行规范排版」「排版规范」。
 agent_created: true
-version: 0.4.0
+version: 0.4.1
 ---
 
 # ipo-doc-formatting
@@ -38,7 +38,7 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 > 模板文件路径（**skill 自带，即样式源**）：`assets/templates/`（相对本 skill 目录）
 > **模板即样式源（2026-08-25 共享化改造）**：使用者可直接修改/替换 `assets/templates/` 下的 docx——**改模板 = 定制输出样式**，输出将跟随新模板。
 > **skillhub 分发版说明**：skillhub 平台不接受 .docx，模板以 `assets/templates/模板包.zip` 提供——首次使用前解压该 zip 到同目录（含 报告模板.docx / 反馈回复样式.docx / 表格模板.docx）；完整模板亦可从 GitHub 获取：`git clone https://github.com/Kianchales/ipo-doc-formatting`
-> 原权威源（专家团资产，模板更新时以权威源为准回同步）：`C:/Users/Kian_/.workbuddy/plugins/marketplaces/my-experts/plugins/ipo-doc-team/references/templates/`
+> 模板权威源为机构内部资产（不随分发包携带）；分发版以包内 `assets/templates/` 为使用源，样式定义以包内模板 + style-map.md/rules.md 为准。
 
 | 模板文件 | 适用文档 | 样式体系 | 关键样式 ID |
 |---------|---------|---------|------------|
@@ -159,3 +159,8 @@ A股 IPO 文档样式应用（2026-08-25 创建，封装专家团「报告样式
 - 版本号规则：**功能/结构变更 bump minor（0.2.0→0.3.0），规则裁定/缺陷修复 bump patch（0.3.0→0.3.1）**；模板 docx 更新在 CHANGELOG 对应版本下记录，不单独 bump
 - 每次变更同步更新 `CHANGELOG.md`（Keep a Changelog 风格：新增/修正/模板留痕/测试 分类）
 - 发布时打 git tag `vX.Y.Z`；当前版本见 frontmatter `version`
+
+**发布前隐私检查（2026-08-26 强制，v0.4.0 泄露事故教训）**：
+- 发布（GitHub Release / skillhub / 任何分发）前必须扫描：`grep -rn "C:/Users\|C:\\\\Users\|\.workbuddy\|marketplaces\|ipo-doc-team\|Kian_" <skill目录>`——**分发包内不得出现任何本机绝对路径、内部插件结构、用户名**
+- 允许保留：`~` 用户目录通配符（安装指引）、GitHub 公开仓库 URL（非隐私）
+- 内部同步说明（权威源位置等）如涉及本机路径，须泛化表述或移出分发内容
