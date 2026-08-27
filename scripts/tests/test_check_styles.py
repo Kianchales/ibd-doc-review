@@ -65,6 +65,13 @@ def run_verify(new_path, orig_path):
     return proc.returncode, proc.stdout
 
 
+def run_diff(new_path, orig_path):
+    """格式修改 diff（2026-08-27 交付物能力：清单+统计）。"""
+    cmd = [sys.executable, SCRIPT, "--input", new_path, "--diff", orig_path]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, proc.stdout
+
+
 def run_numbering(path):
     """序号段落核对（2026-08-25 双维度算法辅助）。"""
     cmd = [sys.executable, SCRIPT, "--input", path, "--check-numbering"]
@@ -210,6 +217,32 @@ class TestCheckStyles(unittest.TestCase):
         code, out = run_numbering(path)
         self.assertEqual(code, 0, f"序号核对应正常，输出:\n{out}")
         self.assertIn("未发现序号开头段落", out, "表格内百分比不应被识别为序号段落")
+
+    def test_diff_same_style_no_changes(self):
+        """格式修改 diff：内容与样式均相同 → 无修改。"""
+        code, out = run_diff(self.good, self.good)
+        self.assertEqual(code, 0, f"diff 应正常，输出:\n{out}")
+        self.assertIn("修改段落：0 处", out, "相同文档应无修改")
+
+    def test_diff_style_changes_generates_list(self):
+        """格式修改 diff：样式变化 → 生成清单（位置/原文/改成什么）+ 统计。"""
+        path = os.path.join(self.tmp, "styled_orig.docx")
+        # 原文：裸段落；修正稿：带样式（内容一致）
+        make_mini_docx(path, [(None, "一、收入确认政策分析"), (None, "报告期内，发行人按照准则确认收入。")])
+        good = os.path.join(self.tmp, "styled_good.docx")
+        make_mini_docx(good, [("002", "一、收入确认政策分析"), ("000", "报告期内，发行人按照准则确认收入。")])
+        code, out = run_diff(good, path)
+        self.assertEqual(code, 0, f"diff 应正常，输出:\n{out}")
+        self.assertIn("修改段落：2 处", out, "两段样式变化应记录 2 处")
+        self.assertIn("PASS（内容未改动）", out, "内容应一致")
+        list_file = good.replace(".docx", "_格式修改清单.md")
+        self.assertTrue(os.path.exists(list_file), "应生成格式修改清单 md 文件")
+        with open(list_file, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("## 修改统计", content)
+        self.assertIn("## 修改明细", content)
+        self.assertIn("002 二级标题", content, "清单应含新样式说明")
+        os.remove(list_file)
 
 
 if __name__ == "__main__":

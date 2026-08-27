@@ -8,6 +8,7 @@ A股 IPO 文档样式应用 Skill —— 在写 Word 或改 Word 文件时，按
 - **模板即样式源**：样式由 `assets/templates/` 下的模板 docx 定义——**修改/替换模板 = 定制输出样式**，无需改代码
 - **三场景自动路由**：已有 docx 整套套样式（apply-template）/ 新建 docx（模板基底填充）/ 局部微调（实时编辑）
 - **内置校验门禁**：`scripts/check_styles.py` 自动检查必备样式、裸段落、空段落、标题跳级、内容完整性（--verify-content）、序号段落核对（--check-numbering）
+- **三件套交付**（2026-08-27）：格式修改输出修正稿（改动高亮）+ 格式问题清单（--diff 生成：位置/原文/改成什么）+ 修改统计
 - **零依赖校验脚本**：check_styles.py 纯 Python 标准库（zipfile/re），无需安装任何包
 
 ## 触发词
@@ -50,6 +51,7 @@ python scripts/check_styles.py --input 你的文档.docx --scenario 反馈回复
 python scripts/check_styles.py --input 你的模板.docx --scenario 反馈回复 --mode template  # 样式库校验
 python scripts/check_styles.py --input 套样式后.docx --verify-content 原文.docx  # 内容完整性（严禁改原文）
 python scripts/check_styles.py --input 你的文档.docx --check-numbering          # 序号段落核对
+python scripts/check_styles.py --input 修正稿.docx --diff 原文.docx            # 格式修改清单+统计
 ```
 
 ## 模板自定义（改模板 = 改输出样式）

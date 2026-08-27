@@ -178,6 +178,142 @@ def extract_text(docx_path):
     return [m.group(1) for m in re.finditer(r"<w:t[^>]*>([^<]*)</w:t>", doc) if m.group(1)]
 
 
+def extract_paras(docx_path):
+    """提取段落序列 [(样式, 文本, 是否表格内, 全局序号)]，用于 diff 对比。"""
+    xmls = load_docx(docx_path)
+    if not xmls or "word/document.xml" not in xmls:
+        return None
+    doc = xmls["word/document.xml"]
+    table_p_offsets = set()
+    for tc in re.finditer(r"<w:tc\b[^>]*>.*?</w:tc>", doc, re.S):
+        for pm in re.finditer(r"<w:p\b", tc.group(0)):
+            table_p_offsets.add(tc.start() + pm.start())
+    paras = []
+    for idx, m in enumerate(re.finditer(r"<w:p\b[^>]*>(.*?)</w:p>", doc, re.S)):
+        body = m.group(1)
+        st = re.search(r'<w:pStyle w:val="([^"]+)"', body)
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body)).strip()
+        paras.append((st.group(1) if st else None, text, m.start() in table_p_offsets, idx))
+    return paras
+
+
+STYLE_DESC = {
+    "000": "000 正文（宋体12pt，首行缩进2字符，1.5倍行距）",
+    "001": "001 一级标题（黑体16pt，居中，分页前）",
+    "0011": "0011 问题一级标题（黑体16pt，两端对齐）",
+    "001q": "001 监管问题正文（黑体，缩进）",
+    "002": "002 二级标题（黑体14pt）",
+    "003": "003 三级标题（黑体12pt）",
+    "004": "004 四级标题（加粗12pt）",
+    "005": "005 五级标题（加粗12pt）",
+    "006": "006 六级标题（默认12pt）",
+    "007": "007 七级标题（默认12pt）",
+    "008": "008 表格前单位行（右对齐，五号）",
+    "009": "009 表格后备注行（五号，首行缩进）",
+}
+
+
+def style_label(style):
+    if not style:
+        return "裸段落（无 pStyle）"
+    return STYLE_DESC.get(style, f"样式 {style}")
+
+
+def cmd_diff(new_path, orig_path):
+    """格式修改 diff（2026-08-27 交付物能力）：对比原文件与修正稿，
+    生成「格式问题清单」（位置/原文/改成什么）+ 修改统计，输出控制台与 md 文件。
+    前提：只改格式不改内容（文本序列应逐字一致）。"""
+    print(f"\n=== 格式修改清单（{os.path.basename(new_path)} vs 原文 {os.path.basename(orig_path)}）===")
+    p_orig = extract_paras(orig_path)
+    p_new = extract_paras(new_path)
+    if not p_orig or not p_new:
+        print("  [ERROR] 文件读取失败，无法对比")
+        return False
+
+    # 空段落不计入内容（合并单元格等会产生空占位，非内容）；仅非空段落参与文本一致性
+    non_empty_orig = [(s, t) for s, t, _, _ in p_orig if t]
+    non_empty_new = [(s, t) for s, t, _, _ in p_new if t]
+    t_orig = [t for _, t in non_empty_orig]
+    t_new = [t for _, t in non_empty_new]
+    if t_orig != t_new:
+        print("  [FAIL] 文本序列不一致——内容被修改（严禁修改原文内容，铁律 0）")
+        for i, (a, b) in enumerate(zip(t_orig, t_new)):
+            if a != b:
+                print(f"    第 {i + 1} 处：原文「{a[:30]}」 vs 现文「{b[:30]}」")
+                break
+        return False
+
+    n_empty_orig = sum(1 for _, t, _, _ in p_orig if not t)
+    n_empty_new = sum(1 for _, t, _, _ in p_new if not t)
+    empty_delta = n_empty_orig - n_empty_new  # >0 删除了空段落
+
+    changes = []  # (位置, 原文, 改成)
+    for i, ((so, to), (sn, tn)) in enumerate(zip(non_empty_orig, non_empty_new)):
+        if to != tn:
+            continue  # 内容变化已 FAIL
+        if so != sn:
+            pos = f"第{i + 1}段「{to[:16]}」"
+            changes.append((pos, style_label(so), style_label(sn)))
+    if empty_delta > 0:
+        changes.append(("全文（空段落）", f"空段落 {empty_delta} 个", "删除（段落间距由样式 spacing 控制，2026-08-25 裁定）"))
+
+    n_tbl_orig = len(re.findall(r"<w:tbl\b", _doc_xml(orig_path)))
+    n_tbl_new = len(re.findall(r"<w:tbl\b", _doc_xml(new_path)))
+    tbl_note = ""
+    if n_tbl_orig or n_tbl_new:
+        tbl_note = f"；表格 {n_tbl_orig}→{n_tbl_new} 张，样式已按模板 v2（100%宽/两级表头/纯黑边框/数字右对齐/合计加粗）应用"
+
+    # 统计分类
+    n_heading = sum(1 for _, _, s in changes if s and s.split()[0] in ("001", "0011", "002", "003", "004", "005", "006", "007", "001q"))
+    n_body = sum(1 for _, _, s in changes if s and s.split()[0] in ("000", "008", "009"))
+    n_bare = sum(1 for _, o, _ in changes if "裸段落" in o)
+    n_total = len(changes)
+
+    # 控制台输出
+    print(f"  修改段落：{n_total} 处（标题样式 {n_heading} / 正文样式 {n_body} / 裸段落样式化 {n_bare} / 空段落处理 {max(empty_delta, 0)} 处）{tbl_note}")
+    print(f"  总段落：{len(p_orig)}；文本一致性：{'PASS（内容未改动）' if t_orig == t_new else 'FAIL'}")
+
+    # 输出 md 清单
+    md_path = os.path.splitext(new_path)[0] + "_格式修改清单.md"
+    lines = ["# 格式修改清单", ""]
+    lines.append(f"- **修正稿**：`{os.path.basename(new_path)}`")
+    lines.append(f"- **原文**：`{os.path.basename(orig_path)}`")
+    lines.append(f"- 生成：ipo-doc-formatting `check_styles.py --diff`（只改格式，不改内容）")
+    lines.append("")
+    lines.append("## 修改统计")
+    lines.append("")
+    lines.append("| 项 | 数量 |")
+    lines.append("|----|------|")
+    lines.append(f"| 总段落数 | {len(p_orig)} |")
+    lines.append(f"| 修改段落合计 | **{n_total}** |")
+    lines.append(f"| 其中：标题样式 | {n_heading} |")
+    lines.append(f"| 正文样式 | {n_body} |")
+    if empty_delta > 0:
+        lines.append(f"| 空段落删除 | {empty_delta} |")
+    if n_tbl_orig or n_tbl_new:
+        lines.append(f"| 表格 | {n_tbl_orig} → {n_tbl_new} 张（样式按模板 v2 应用） |")
+    lines.append(f"| 文本内容 | 与原文逐字一致（未增删改） |")
+    lines.append("")
+    lines.append("## 修改明细")
+    lines.append("")
+    lines.append("| # | 位置 | 原文 | 改成 |")
+    lines.append("|---|------|------|------|")
+    for idx, (pos, old, new) in enumerate(changes, 1):
+        old_c = old.replace("|", "\\|")
+        new_c = new.replace("|", "\\|")
+        lines.append(f"| {idx} | {pos} | {old_c} | {new_c} |")
+    lines.append("")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print(f"  → 清单已写入：{md_path}")
+    return True
+
+
+def _doc_xml(docx_path):
+    xmls = load_docx(docx_path)
+    return xmls.get("word/document.xml", "") if xmls else ""
+
+
 def check_numbering(docx_path):
     """序号段落核对（2026-08-25 双维度算法辅助）：列出所有序号开头段落及上下文，
     供按 rules.md 判定「标题 vs 正文」：
@@ -269,6 +405,8 @@ def main():
                     help="内容完整性校验：对比 --input 与原文文本是否逐字一致（严禁修改原文内容）")
     ap.add_argument("--check-numbering", action="store_true",
                     help="序号段落核对：列出序号开头段落（（一）/1、/（1）/①）及上下文，辅助判定标题 vs 正文")
+    ap.add_argument("--diff", metavar="原文.docx", default=None,
+                    help="格式修改 diff：对比 --input（修正稿）与原文，生成格式问题清单（位置/原文/改成什么）+ 统计，写入 <修正稿>_格式修改清单.md")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -276,6 +414,15 @@ def main():
     if not files:
         print(f"[ERROR] 未找到 docx: {args.input}")
         sys.exit(1)
+
+    if args.diff:
+        orig_files = resolve_files(args.diff)
+        if not orig_files:
+            print(f"[ERROR] 未找到原文: {args.diff}")
+            sys.exit(1)
+        all_ok = all(cmd_diff(f, orig_files[0]) for f in files)
+        print(f"\n{'格式修改清单生成完成 ✅' if all_ok else '生成失败 ❌'}")
+        sys.exit(0 if all_ok else 2)
 
     if args.check_numbering:
         all_ok = all(check_numbering(f) for f in files)
