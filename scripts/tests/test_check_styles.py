@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_check_styles.py — ipo-doc-formatting 校验脚本自测（2026-08-25 标准流程强化）
+test_check_styles.py — ipo-doc-formatting 校验脚本自测（标准流程强化）
 覆盖：
   1. 合格反馈回复文档 → 通过（PASS）
   2. 不合格文档（无 pStyle）→ 失败（FAIL）
@@ -59,7 +59,7 @@ def run_check(path, scenario="反馈回复", mode="document"):
 
 
 def run_verify(new_path, orig_path):
-    """内容完整性校验（严禁修改原文内容，2026-08-25 裁定）。"""
+    """内容完整性校验（严禁修改原文内容）。"""
     cmd = [sys.executable, SCRIPT, "--input", new_path, "--verify-content", orig_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return proc.returncode, proc.stdout
@@ -73,7 +73,7 @@ def run_diff(new_path, orig_path):
 
 
 def run_numbering(path):
-    """序号段落核对（2026-08-25 双维度算法辅助）。"""
+    """序号段落核对（双维度算法辅助）。"""
     cmd = [sys.executable, SCRIPT, "--input", path, "--check-numbering"]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return proc.returncode, proc.stdout
@@ -181,7 +181,7 @@ class TestCheckStyles(unittest.TestCase):
         self.assertIn("[FAIL]", out)
 
     def test_numbering_case1_and_case2(self):
-        """序号段落核对（2026-08-25 双维度算法）：情况1 标题+展开 vs 情况2 列举正文。"""
+        """序号段落核对（双维度算法）：情况1 标题+展开 vs 情况2 列举正文。"""
         # 情况1：短标题（一）后跟独立正文；情况2：长句 1、2、3、连续序号列举
         body_paras = [
             ("003", "（一）营业收入构成分析"),

@@ -3,7 +3,7 @@
 """
 check_styles.py — IPO 文档样式应用检查脚本（ipo-doc-formatting skill 附带）
 功能：
-  - 成品文档模式（默认）：统计 docx 中 pStyle 使用分布，校验必备样式、裸段落、空段落（2026-08-25 裁定：段落间禁止空行）、标题跳级。
+  - 成品文档模式（默认）：统计 docx 中 pStyle 使用分布，校验必备样式、裸段落、空段落（段落间禁止空行）、标题跳级。
   - 模板/样式库模式（--mode template）：校验 styles.xml 中 000-009 / 0011+001 / a4-a6 样式定义完整性。
 用法：
   python check_styles.py --input <docx路径或目录> --scenario 招股书|反馈回复|报告 [--mode document|template]
@@ -32,7 +32,7 @@ HEADING_STYLES = set(OUTLINE.keys())
 # 样式库模式：styles.xml 应包含的样式 ID
 LIBRARY = ["000", "001", "002", "003", "004", "005", "006", "007", "008", "009", "a4", "a5", "a6"]
 LIBRARY_EXTRA = {"反馈回复": ["0011", "001"]}
-# 序号开头段落判定（2026-08-25 双维度算法）：序号前缀模式
+# 序号开头段落判定（双维度算法）：序号前缀模式
 # 注意：半角点须后跟空白（区分 "1. 标题" 与 "78.50" 小数）；表格内数字另行排除
 NUMBER_PAT = re.compile(
     r"^[（(]\s*[一二三四五六七八九十百\d]+\s*[）)]"   # （一）（1）(一)(1)
@@ -79,7 +79,7 @@ def check_document(docx_path, scenario):
     stats = {}
     bare = []
     heading_seq = []
-    empty = []  # 空段落（2026-08-25 用户裁定：段落间禁止空行/空段落）
+    empty = []  # 空段落（段落间禁止空行/空段落）
 
     # 标记表格单元格（<w:tc>）内的段落起始位置——表格单元格内容走表格样式（a6/直接格式），
     # 不套 000-009 正文样式，不应计入「裸段落」误报；表格内空段亦不算违规
@@ -129,9 +129,9 @@ def check_document(docx_path, scenario):
     else:
         print("  [PASS] 无裸正文段落")
 
-    # 空段落检查（2026-08-25 用户裁定：段落间禁止空行/空段落）
+    # 空段落检查（段落间禁止空行/空段落）
     if empty:
-        print(f"  [WARN] {len(empty)} 个空段落（无文字内容，2026-08-25 裁定禁止——"
+        print(f"  [WARN] {len(empty)} 个空段落（无文字内容，禁止——"
               f"间距由样式 spacing 控制，空段落应删除）：")
     else:
         print("  [PASS] 无空段落（段落间距由样式 spacing 控制）")
@@ -255,7 +255,7 @@ def cmd_diff(new_path, orig_path):
             pos = f"第{i + 1}段「{to[:16]}」"
             changes.append((pos, style_label(so), style_label(sn)))
     if empty_delta > 0:
-        changes.append(("全文（空段落）", f"空段落 {empty_delta} 个", "删除（段落间距由样式 spacing 控制，2026-08-25 裁定）"))
+        changes.append(("全文（空段落）", f"空段落 {empty_delta} 个", "删除（段落间距由样式 spacing 控制）"))
 
     n_tbl_orig = len(re.findall(r"<w:tbl\b", _doc_xml(orig_path)))
     n_tbl_new = len(re.findall(r"<w:tbl\b", _doc_xml(new_path)))
@@ -315,7 +315,7 @@ def _doc_xml(docx_path):
 
 
 def check_numbering(docx_path):
-    """序号段落核对（2026-08-25 双维度算法辅助）：列出所有序号开头段落及上下文，
+    """序号段落核对（双维度算法辅助）：列出所有序号开头段落及上下文，
     供按 rules.md 判定「标题 vs 正文」：
       情况1（标题）：序号段短 + 后段独立正文展开 → 序号段用标题样式，后段 000
       情况2（列举正文）：序号段长 + 后段连续序号/无后段 → 序号段本身用 000
@@ -370,7 +370,7 @@ def check_numbering(docx_path):
 
 
 def verify_content(docx_path, original_path):
-    """内容完整性检查（2026-08-25 用户裁定：只改格式、严禁修改原文内容）。
+    """内容完整性检查（只改格式、严禁修改原文内容）。
     套样式后的文本必须与原文逐字一致（含表格内文字、标点、空格、数字）。"""
     print(f"\n=== 内容完整性校验（{os.path.basename(docx_path)} vs 原文 {os.path.basename(original_path)}）===")
     t_orig = extract_text(original_path)
@@ -391,7 +391,7 @@ def verify_content(docx_path, original_path):
     else:
         if len(t_orig) != len(t_new):
             print(f"  [FAIL] 文本段数量不一致：原文 {len(t_orig)} 段 → 现文 {len(t_new)} 段（有增删）")
-    print("  [FAIL] 严禁修改原文内容（2026-08-25 用户裁定）——打回重做")
+    print("  [FAIL] 严禁修改原文内容——打回重做")
     return False
 
 
