@@ -433,12 +433,23 @@ def check_spaces(items):
         t = info["text"]
         if not t:
             continue
+        layout_spacing = bool(re.search(r"年\s{2,}月\s{2,}日", t) or
+                              re.search(r"目\s{2,}录", t))
+        # 排版性豁免（2026-08-27 实测）：签署页「年 月 日」、目录页「目 录」为规范排版；
+        # 少量短词宽间隔（如签署页人名「邱  嵩」）降为提示级
         for m in RE_MULTI_SPACE_CJK.finditer(t):
             ctx_l = max(0, m.start() - 10)
+            snippet = t[ctx_l:m.end() + 10]
+            if layout_spacing or re.search(r"目\s{2,}录", t):
+                continue
+            non_space_len = len(re.sub(r"\s", "", t))
+            sev = "LOW" if (non_space_len <= 6 and t.count("  ") >= 1) else "HIGH"
             issues.append(Issue(
                 "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
-                f"「…{t[ctx_l:m.end() + 10]}…」", m.group(0),
-                "中文之间出现连续空格", "删除多余空格", "HIGH"))
+                f"「…{snippet[:24]}…」", m.group(0),
+                ("短词宽间隔（疑似签署页/排版用途，低级别提示）" if sev == "LOW"
+                 else "中文之间出现连续空格"),
+                "确认是否为刻意排版；否则删除多余空格", sev))
         for m in RE_DUP_CN_PUNCT.finditer(t):
             ctx_l = max(0, m.start() - 10)
             issues.append(Issue(
@@ -799,54 +810,67 @@ def check_calc(tables):
         rows = tbl["rows"]
         texts = [[c["text"] for c in row] for row in rows]
 
-        # (a) 合计行求和校验
+        # (a) 合计行求和校验（其余数据行列和 vs 合计行；×100 差异视为单位口径问题）
         for ri, trow in enumerate(texts):
-            if any(("合计" in c) or ("总计" in c) for c in trow if isinstance(c, str)):
-                vals_in_row = [_to_num(c) for c in trow]
-                numeric_cols = [ci for ci, v in enumerate(vals_in_row)
-                                if v is not None and ri > 0 and c_ok_text(trow, ci)]
-                continue_ = False
-                del numeric_cols, vals_in_row
-                # 采用「其余数据行的列和 vs 合计行该列」的方法
-                header_rows = 1 if ri > 0 else 0
-                data_rows = [trow2 for ri2, trow2 in enumerate(texts) if ri2 != ri and ri2 >= header_rows]
-                bad_cols = []
-                checked_cols = 0
-                n_data = len(data_rows)
-                if n_data < 2:
-                    continue_
-                for ci in range(len(trow)):
-                    col_total = _to_num(trow[ci])
-                    if col_total is None:
-                        continue
-                    parts = []
-                    ok = True
-                    for drow in data_rows:
-                        if ci >= len(drow):
-                            ok = False
-                            break
-                        pv = _to_num(drow[ci])
-                        if pv is None:
-                            ok = False
-                            break
-                        parts.append(pv)
-                    if not ok or not parts:
-                        continue
-                    checked_cols += 1
-                    s = round(sum(parts), 4)
-                    tol = max(0.02, abs(col_total) * 0.001)
-                    if abs(s - col_total) > tol:
-                        bad_cols.append((ci, s, col_total))
-                if checked_cols and bad_cols:
-                    ci, s, tot = bad_cols[0]
-                    issues.append(Issue(
-                        "calc", "表格合计与占比计算校验",
-                        f"表{no} 合计行（第{ri + 1}行）第{ci + 1}列",
-                        f"分项之和 {s:g} ≠ 合计值 {tot:g}",
-                        "疑似计算错误或分项有遗漏（容差已计入四舍五入），请人工复核",
-                        "HIGH" == "HIGH" and "重新计算合计或补充分项" or "", "HIGH"))
-                # continue 占位避免误用
-                del continue_
+            if not any(("合计" in c) or ("总计" in c) for c in trow if isinstance(c, str)):
+                continue
+            header_rows = 1 if ri > 0 else 0
+            data_rows = [r2 for ri2, r2 in enumerate(texts)
+                         if ri2 >= header_rows and ri2 != ri and any(c.strip() for c in r2)]
+            if len(data_rows) < 2:
+                continue
+            bad_cols = []
+            for ci in range(len(trow)):
+                col_total = _to_num(trow[ci])
+                if col_total is None:
+                    continue
+                parts = []
+                ok_all = True
+                for drow in data_rows:
+                    v = _to_num(drow[ci]) if ci < len(drow) else None
+                    if v is None:
+                        ok_all = False
+                        break
+                    parts.append(v)
+                if not ok_all or not parts:
+                    continue  # 该列存在非数值单元格，跳过（无法可靠求和）
+                s = round(sum(parts), 4)
+                tol = max(0.02, abs(col_total) * 0.001)
+                if abs(s - col_total) > tol:
+                    bad_cols.append((ci, s, col_total))
+            if not bad_cols:
+                continue
+            # 单位口径差异识别：(i) 分项之和恰为合计值的 100 倍（小数 vs 百分数）
+            #                   (ii) 合计值 ≈100 而 分项均为大额绝对值（合计行该格实为「100%」占比）
+            unit_issue = []
+            real_bad = []
+            for bc in bad_cols:
+                ci, s, tot = bc
+                if s and abs(s - tot * 100) <= max(0.02, abs(tot * 100) * 0.001):
+                    unit_issue.append(bc)   # 小数 vs 百分数 口径
+                else:
+                    data_vals = [_to_num(drow[ci]) for drow in data_rows
+                                 if ci < len(drow) and _to_num(drow[ci]) is not None]
+                    if data_vals and abs(tot - 100) <= 2 and                        sum(1 for v in data_vals if abs(v) > 500) >= max(2, len(data_vals) // 2):
+                        # 合计值≈100 实为「100%」占比标记，分项为大额绝对值
+                        unit_issue.append(bc)
+                    else:
+                        real_bad.append(bc)
+            if unit_issue:
+                ci, s, tot = unit_issue[0]
+                issues.append(Issue(
+                    "calc", "表格合计与占比计算校验",
+                    f"表{no} 合计行第{ci + 1}列",
+                    f"分项之和 {s:g} 为合计值 {tot:g} 的 100 倍",
+                    "疑似单位/口径不一致（分项与合计数量级差异过大），请人工核实",
+                    "MEDIUM"))
+            for ci, s, tot in real_bad[:3]:
+                issues.append(Issue(
+                    "calc", "表格合计与占比计算校验",
+                    f"表{no} 合计行（第{ri + 1}行）第{ci + 1}列",
+                    f"分项之和 {s:g} ≠ 合计值 {tot:g}",
+                    "疑似计算错误或分项有遗漏（容差已计入四舍五入），请人工复核",
+                    "重新计算合计或补充分项", "HIGH"))
 
         # (b) 占比列合计 ≈100%
         ncols = max((len(r) for r in texts), default=0)

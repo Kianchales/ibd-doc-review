@@ -1,19 +1,92 @@
 [
-  {"pattern": "台湾.*国家", "level": "CRITICAL", "note": "将台湾列为国家", "suggestion": "必须表述为「中国台湾地区」，严禁并列或等同为国家"},
-  {"pattern": "中华民国", "level": "CRITICAL", "note": "严禁使用", "suggestion": "删除该称谓；涉及历史语境须按规定表述并报合规审核"},
-  {"pattern": "台湾政府", "level": "CRITICAL", "note": "应称台湾当局", "suggestion": "改为「台湾当局」"},
-  {"pattern": "台湾总统", "level": "CRITICAL", "note": "严禁使用", "suggestion": "改为「台湾地区领导人」"},
-  {"pattern": "福摩萨|福尔摩沙", "level": "CRITICAL", "note": "禁用称谓", "suggestion": "统一表述为「中国台湾」或「台湾地区」"},
-  {"pattern": "中台(?!湾)", "level": "CRITICAL", "note": "中台并列（已排除「台湾」本身）", "suggestion": "改为「大陆与台湾地区」等规范并列表述"},
-  {"pattern": "中港", "level": "CRITICAL", "note": "中港并列不当", "suggestion": "改为「内地与香港」「中国香港」等规范表述"},
-  {"pattern": "两岸三地", "level": "CRITICAL", "note": "禁用提法", "suggestion": "改为「两岸暨港澳」等规范表述"},
-
-  {"pattern": "(?<!中国)台湾(?!地区)", "level": "IMPORTANT", "note": "「台湾」未加「中国」限定前缀", "suggestion": "首次出现及关键场合应表述为「中国台湾」或「台湾地区」（排除已带限定的情况）"},
-  {"pattern": "Mainland China", "level": "IMPORTANT", "note": "英文不规范表述", "suggestion": "改为 the Chinese mainland 或 China's mainland"},
-  {"pattern": "港澳台游客来华", "level": "IMPORTANT", "note": "港澳台同胞来大陆不应表述为来华", "suggestion": "改为「港澳台游客来大陆/内地」"},
-  {"pattern": "一中各表", "level": "IMPORTANT", "note": "不得提及的表述", "suggestion": "删除该表述"},
-
-  {"pattern": "中央(?!.*台湾)", "level": "MINOR", "note": "含「中央」的台湾机构未加引号", "suggestion": "涉台机构名称中的「中央」等字样建议加引号，请结合上下文核实"},
-  {"pattern": "国立(?!.*台湾)", "level": "MINOR", "note": "含「国立」的台湾机构未加引号", "suggestion": "涉台教育科研机构的「国立」字样建议加引号"},
-  {"pattern": "中华台北", "level": "MINOR", "note": "体育等特定场合外的表述", "suggestion": "一般场合应称「中国台北」"}
+  {
+    "pattern": "台湾.*国家",
+    "level": "CRITICAL",
+    "note": "将台湾列为国家",
+    "suggestion": "必须表述为「中国台湾地区」，严禁并列或等同为国家"
+  },
+  {
+    "pattern": "中华民国",
+    "level": "CRITICAL",
+    "note": "严禁使用",
+    "suggestion": "删除该称谓；涉及历史语境须按规定表述并报合规审核"
+  },
+  {
+    "pattern": "台湾政府",
+    "level": "CRITICAL",
+    "note": "应称台湾当局",
+    "suggestion": "改为「台湾当局」"
+  },
+  {
+    "pattern": "台湾总统",
+    "level": "CRITICAL",
+    "note": "严禁使用",
+    "suggestion": "改为「台湾地区领导人」"
+  },
+  {
+    "pattern": "福摩萨|福尔摩沙",
+    "level": "CRITICAL",
+    "note": "禁用称谓",
+    "suggestion": "统一表述为「中国台湾」或「台湾地区」"
+  },
+  {
+    "pattern": "(?<!业务)(?<!数据)(?<!技术)(?!<数字化)中台(?!湾)",
+    "level": "CRITICAL",
+    "note": "中台并列表述（已排除「台湾」及「业务/数据中台」等技术词）",
+    "suggestion": "改为「大陆与台湾地区」等规范并列表述"
+  },
+  {
+    "pattern": "中港",
+    "level": "CRITICAL",
+    "note": "中港并列不当",
+    "suggestion": "改为「内地与香港」「中国香港」等规范表述"
+  },
+  {
+    "pattern": "两岸三地",
+    "level": "CRITICAL",
+    "note": "禁用提法",
+    "suggestion": "改为「两岸暨港澳」等规范表述"
+  },
+  {
+    "pattern": "(?<!中国)台湾(?!地区)",
+    "level": "IMPORTANT",
+    "note": "「台湾」未加「中国」限定前缀",
+    "suggestion": "首次出现及关键场合应表述为「中国台湾」或「台湾地区」（排除已带限定的情况）"
+  },
+  {
+    "pattern": "Mainland China",
+    "level": "IMPORTANT",
+    "note": "英文不规范表述",
+    "suggestion": "改为 the Chinese mainland 或 China's mainland"
+  },
+  {
+    "pattern": "港澳台游客来华",
+    "level": "IMPORTANT",
+    "note": "港澳台同胞来大陆不应表述为来华",
+    "suggestion": "改为「港澳台游客来大陆/内地」"
+  },
+  {
+    "pattern": "一中各表",
+    "level": "IMPORTANT",
+    "note": "不得提及的表述",
+    "suggestion": "删除该表述"
+  },
+  {
+    "pattern": "中央(?!.*台湾)",
+    "level": "MINOR",
+    "note": "含「中央」的台湾机构未加引号",
+    "suggestion": "涉台机构名称中的「中央」等字样建议加引号，请结合上下文核实"
+  },
+  {
+    "pattern": "国立(?!.*台湾)",
+    "level": "MINOR",
+    "note": "含「国立」的台湾机构未加引号",
+    "suggestion": "涉台教育科研机构的「国立」字样建议加引号"
+  },
+  {
+    "pattern": "中华台北",
+    "level": "MINOR",
+    "note": "体育等特定场合外的表述",
+    "suggestion": "一般场合应称「中国台北」"
+  }
 ]
