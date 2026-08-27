@@ -12,7 +12,7 @@ description: >
   「反馈回复排版」「落实函格式」「套用 000-009 样式」「报告模板样式」「套模板样式」
   「把这个 Word 改成XXX格式」「按投行规范排版」「排版规范」。
 agent_created: true
-version: 0.5.0
+version: 0.5.1
 ---
 
 # ipo-doc-formatting
@@ -158,3 +158,8 @@ A 股 IPO 文档格式处理 Skill，负责 Word 文档的样式应用。
 - **中文文件名编码**：Git Bash 向 Python/minimax CLI 传中文文件名参数可能乱码（zipfile 读 报告模板.docx 曾报 "No such item"）→ 优先用 Python `glob.glob`/`os.listdir` 遍历目录取文件，或复制为临时英文文件名再处理
 - **minimax-docx 环境**：restore 必须用 csproj（.slnx 不支持 dotnet 8）；依赖华为云 NuGet 镜像
 - **apply-template 语义**：把模板样式套到源文件（保留源内容换样式），不是以模板内容为基底——新建场景用 create，套用场景用 apply-template，勿混淆
+- **--revise 修订稿三坑（2026-08-27 实测，OpenXmlValidator 实证）**：
+  1. **元素名是 `w:trackRevisions`，不存在 `w:trackChanges`**——settings.xml 写 trackChanges 是非法元素，Word 静默忽略，修订记录与显示全部失效；合法插入位置为 `w:bordersDoNotSurroundFooter` 之后（25 个位置暴力测试仅此一处过 validator），revisionView 必须带 `w:formatting="1"` 否则打开时格式标记默认隐藏
+  2. **pPrChange 快照 pPr 不允许含 `w:rPr`**（CT_PPrGeneral 类型）——真实文档裸段落（有 pPr 无 pStyle）快照时须剔除段落标记 run 属性，否则 Word 视为无效修订节点不显示
+  3. **气泡缺失的诊断顺序（2026-08-27 排查中尚未定案）**：正常情况下 pPrChange（段落属性/样式更改）应显示「已设置格式」气泡；若审阅窗格有条目但正文无气泡，按序排查：①窗口宽度不足 Word 静默回退嵌入模式（缩放调小/最大化验证）；②修订选项里「更改行」标记是否设为「无」；③用户报告其环境一度全局失去 pPrChange 气泡（含其他历史文档），疑与 Office 更新/全局设置有关——**用「Word 原生生成的格式修订文档」做对照组一锤定音后再归因，勿凭单点现象判定生成缺陷**
+- **verify-content 必须段落级拼接对比**：按 `<w:t>` 逐 run 对比会被 merge-runs 破坏对齐而误报「内容被修改」；extract_para_texts 按段落拼接全部 w:t 后再比，与 run 结构无关

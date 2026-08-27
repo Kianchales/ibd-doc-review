@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1] - 2026-08-27
+
+### 修正（--revise 修订稿 OpenXmlValidator 实证）
+- **修订模式元素名修正**：`w:trackChanges` → `w:trackRevisions`（前者在 CT_Settings schema 不存在，Word 静默忽略导致修订失效）；插入位置为 `w:bordersDoNotSurroundFooter` 之后（schema 序列 25 位置暴力测试仅此一处合法）
+- **revisionView 补 `w:formatting="1"`**：否则打开文档时格式更改标记默认隐藏
+- **pPrChange 快照剔除 `w:rPr`**：CT_PPrGeneral 不允许段落标记 run 属性，含则 Word 视为无效修订节点不显示
+- **无 pStyle 段落插入修复**：原 replace 漏掉开标签 ">"，真实文档裸段落（有 pPr 无 pStyle）必现多余 ">"
+- 踩坑记录固化（SKILL.md）：修订元素名/位置/快照、气泡缺失诊断顺序、verify-content 段落级对比
+- 自测扩至 14 用例（trackRevisions 元素名/顺序、裸段落无多余 ">"、原 pPr 直接格式保留）
+
 ## [0.5.0] - 2026-08-27
 
 ### 新增

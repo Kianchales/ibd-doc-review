@@ -35,7 +35,7 @@ A 股 IPO 文档格式处理 Skill。
 
 ## 版本
 
-当前版本 **v0.5.0**（frontmatter `version` 为准；版本演进见 `CHANGELOG.md`）。想固定某个版本使用时，checkout 对应 git tag 或下载对应 Release。
+当前版本 **v0.5.1**（frontmatter `version` 为准；版本演进见 `CHANGELOG.md`）。想固定某个版本使用时，checkout 对应 git tag 或下载对应 Release。
 
 ## 使用流程（S1-S7）
 

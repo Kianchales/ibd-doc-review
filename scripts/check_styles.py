@@ -220,9 +220,16 @@ def _rebuild_para_revision(body, new_style, author, date, rev_id):
         if old_style_m:
             new_ppr = old_ppr[:old_style_m.start(1)] + new_style + old_ppr[old_style_m.end(1):]
         else:
-            new_ppr = old_ppr.replace("<w:pPr", f'<w:pPr><w:pStyle w:val="{new_style}"/>', 1)
+            # 无 pStyle：在 pPr 开标签后插入 pStyle（2026-08-27 修复：原 replace("<w:pPr",...) 
+            # 漏掉开标签的 ">"，导致 <w:pStyle/> 后残留多余 ">"，真实文档裸段落（有 pPr 无 pStyle）必现）
+            open_m = re.search(r"<w:pPr\b[^>]*>", old_ppr)
+            if open_m:
+                new_ppr = old_ppr[:open_m.end()] + f'<w:pStyle w:val="{new_style}"/>' + old_ppr[open_m.end():]
+            else:
+                new_ppr = old_ppr
+        change_snapshot = re.sub(r"<w:rPr>.*?</w:rPr>", "", old_ppr, flags=re.S)
         change = (f'<w:pPrChange w:id="{rev_id}" w:author="{author}" w:date="{date}">'
-                  f"{old_ppr}</w:pPrChange>")
+                  f"{change_snapshot}</w:pPrChange>")
         new_ppr = new_ppr[: -len("</w:pPr>")] + change + "</w:pPr>"
         return body[: ppr_m.start()] + new_ppr + body[ppr_m.end():]
     new_ppr = (f'<w:pPr><w:pStyle w:val="{new_style}"/>'
@@ -269,13 +276,35 @@ def make_revision(orig_path, styled_path, output_path):
             orig_doc = orig_doc.replace(body, new_body, 1)
             n_changes += 1
 
-    # 开启修订模式（settings.xml 加 trackChanges；load_docx 不含 settings，直接读 zip）
+    # 开启修订模式（settings.xml 加 trackRevisions + revisionView；load_docx 不含 settings，直接读 zip）
     settings = ""
     with zipfile.ZipFile(orig_path) as z:
         if "word/settings.xml" in z.namelist():
             settings = z.read("word/settings.xml").decode("utf-8")
-    if settings and "<w:trackChanges/>" not in settings and "<w:trackChanges " not in settings:
-        settings = settings.replace("</w:settings>", "<w:trackChanges/></w:settings>", 1)
+    if settings:
+        # 2026-08-27 三次修复（OpenXmlValidator 实证）：
+        #   a) 正确元素名是 w:trackRevisions，不是 w:trackChanges——后者在 CT_Settings schema 中
+        #      根本不存在，Word 解析时忽略/容错，修订记录与显示全部失效；
+        #   b) 合法位置是 w:bordersDoNotSurroundFooter 之后（CT_Settings 序列：
+        #      ...bordersHeader→bordersFooter→revisionView→trackRevisions→defaultTabStop...），
+        #      插到其他任何位置 OpenXmlValidator 均报 unexpected/invalid child；
+        #   c) revisionView 必须带 w:formatting="1"，否则打开时格式更改标记默认隐藏。
+        rv = ('<w:revisionView w:markup="1" w:comments="1" w:insDel="1"'
+              ' w:formatting="1" w:inkAnnotations="1"/>')
+        insert_block = ""
+        if "<w:revisionView" not in settings:
+            insert_block += rv
+        if "<w:trackRevisions" not in settings:
+            insert_block += "<w:trackRevisions/>"
+        if insert_block:
+            m = re.search(r"<w:bordersDoNotSurroundFooter\b[^>]*/>", settings) or \
+                re.search(r"<w:bordersDoNotSurroundFooter\b[^>]*>.*?</w:bordersDoNotSurroundFooter>",
+                          settings, re.S)
+            if m:
+                settings = settings[: m.end()] + insert_block + settings[m.end():]
+            else:
+                # 兜底：无 bordersFooter 时追加末尾（尽力而为，标准文档均有该元素）
+                settings = settings.replace("</w:settings>", insert_block + "</w:settings>", 1)
 
     # 写回新 docx（复用原文件全部部件，替换 document.xml/settings.xml）
     try:

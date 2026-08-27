@@ -50,7 +50,8 @@ def make_mini_docx(path, paras):
     settings = (
         '<?xml version="1.0"?>'
         '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        '<w:zoom w:percent="100"/></w:settings>'
+        '<w:zoom w:percent="100"/><w:bordersDoNotSurroundFooter/>'
+        '<w:defaultTabStop w:val="420"/></w:settings>'
     )
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", ct)
@@ -271,8 +272,60 @@ class TestCheckStyles(unittest.TestCase):
             doc = z.read("word/document.xml").decode("utf-8")
             settings = z.read("word/settings.xml").decode("utf-8")
         self.assertEqual(doc.count("<w:pPrChange "), 2, "两段样式变化应有 2 处格式更改修订")
-        self.assertIn("<w:trackChanges/>", settings, "应开启修订模式")
+        self.assertIn("<w:trackRevisions/>", settings, "应开启修订模式（正确元素名是 w:trackRevisions，"
+                      "不存在 w:trackChanges——OpenXmlValidator 实证）")
+        self.assertNotIn("w:trackChanges", settings, "不得含非法元素 w:trackChanges")
         self.assertIn('w:author="ipo-doc-formatting"', doc, "修订作者应标注")
+        self.assertIn("w:formatting=\"1\"", settings,
+                      "应默认显示格式更改修订（revisionView formatting=1），否则 Word 打开看不见标记")
+        # CT_Settings 序列（OpenXmlValidator 实证唯一合法位置）：bordersDoNotSurroundFooter
+        # → revisionView → trackRevisions → defaultTabStop
+        self.assertLess(settings.index("<w:bordersDoNotSurroundFooter"),
+                        settings.index("<w:revisionView"),
+                        "revisionView 应在 bordersDoNotSurroundFooter 之后（CT_Settings 序列）")
+        self.assertLess(settings.index("<w:revisionView"), settings.index("<w:trackRevisions/>"),
+                        "revisionView 应紧邻 trackRevisions 之前")
+        os.remove(out)
+
+    def test_revise_bare_para_with_ppr_no_stray_gt(self):
+        """回归：裸段落「有 pPr 但无 pStyle」生成修订时，不得残留多余 '>'（2026-08-27 修复）。
+        真实文档裸段落 pPr 含 spacing/ind/rPr 直接格式，旧实现 replace('<w:pPr', ...) 漏掉
+        开标签 '>' 导致 <w:pStyle/> 后多一个 '>'，XML 损坏。"""
+        def make_with_ppr(path, paras):
+            """paras: [(pstyle|None, text)]；None 也生成带 spacing/ind 直接格式的 pPr（模拟真实裸段落）。"""
+            body = []
+            for style, text in paras:
+                if style:
+                    ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>'
+                else:
+                    ppr = ('<w:pPr><w:spacing w:line="360" w:lineRule="auto"/>'
+                           '<w:ind w:firstLineChars="200" w:firstLine="480"/></w:pPr>')
+                body.append(f"<w:p>{ppr}<w:r><w:t>{text}</w:t></w:r></w:p>")
+            doc = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                f'<w:document {NS}><w:body>{"".join(body)}<w:sectPr/></w:body></w:document>'
+            )
+            with zipfile.ZipFile(self.good) as z:
+                ct = z.read("[Content_Types].xml")
+                rels = z.read("_rels/.rels")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr("[Content_Types].xml", ct)
+                z.writestr("_rels/.rels", rels)
+                z.writestr("word/document.xml", doc)
+
+        orig = os.path.join(self.tmp, "rev_bare_orig.docx")
+        styled = os.path.join(self.tmp, "rev_bare_styled.docx")
+        out = os.path.join(self.tmp, "rev_bare_out.docx")
+        make_with_ppr(orig, [(None, "一、收入确认政策分析"), (None, "报告期内，发行人按照准则确认收入。")])
+        make_with_ppr(styled, [("002", "一、收入确认政策分析"), ("000", "报告期内，发行人按照准则确认收入。")])
+        code, _ = run_revise(styled, orig, out)
+        self.assertEqual(code, 0, "修订稿生成应成功")
+        with zipfile.ZipFile(out) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+        self.assertEqual(doc.count("<w:pPrChange "), 2, "两段样式变化应有 2 处格式更改修订")
+        self.assertNotIn("/>>", doc.replace("</w:pPrChange>", ""), "不得残留多余 '>'（/> 后紧跟 >）")
+        self.assertIn('<w:pStyle w:val="002"/>', doc, "修订后段落应带新 pStyle")
+        self.assertIn("<w:spacing w:line=\"360\"", doc, "原 pPr 直接格式应保留")
         os.remove(out)
 
 
