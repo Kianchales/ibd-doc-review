@@ -375,7 +375,8 @@ class TestCheckStyles(unittest.TestCase):
         self.assertEqual(code, 0, f"核对应正常完成，输出:\n{out}")
         report = read_content_report(path)
         self.assertIn("中文语境使用半角标点", report)
-        self.assertIn("误用全角", report)
+        # 2026-08-27 裁定：英英之间全角标点不再报（投行中文阅读习惯）
+        self.assertNotIn("误用全角", report)
 
     def test_content_amount_exemptions(self):
         """格式核对豁免：比例%、文号/编码不报；仅真实金额检出。"""
@@ -407,7 +408,8 @@ class TestCheckStyles(unittest.TestCase):
         rep_bad = read_content_report(bad_path)
         rep_good = read_content_report(good_path)
         self.assertIn("中文语境使用半角标点", rep_bad, "中文语境半角 ( , ? 应检出")
-        self.assertIn("误用全角", rep_bad, "ABC，DEF 英英间全角逗号应检出")
+        # 2026-08-27 裁定：英英之间全角标点不再报（投行中文阅读习惯）
+        self.assertNotIn("误用全角", rep_bad)
         for banned in ["中文语境使用半角标点", "误用全角"]:
             self.assertNotIn(banned, rep_good, f"规范写法不应报「{banned}」")
 

@@ -256,6 +256,12 @@ def check_heading_seq(items):
         if kind != "body" or not info["text"]:
             continue
         text = info["text"]
+        # 引号包裹的引用内容不参与序号核对（2026-08-27 裁定：引用条款/承诺原文
+        # 内部的「1.」「（一）」等为其自身格式，不应与正文序号链混排）
+        stripped = text.strip()
+        if stripped[:1] in ('"', "'", "\u201c", "\u201d", "\u300c", "\u300d") or \
+           (stripped.startswith('"') and stripped.endswith('"')):
+            continue
         parsed = parse_numbering(text)
         if not parsed:
             continue
@@ -470,14 +476,14 @@ def check_spaces(items):
             snippet = t[ctx_l:m.end() + 10]
             if layout_spacing or re.search(r"目\s{2,}录", t):
                 continue
-            non_space_len = len(re.sub(r"\s", "", t))
-            sev = "LOW" if (non_space_len <= 6 and t.count("  ") >= 1) else "HIGH"
+            # 短词宽间隔（签署页人名/对齐排版，2026-08-27 裁定）完全忽略
+            if len(re.sub(r"\s", "", t)) <= 6:
+                continue
             issues.append(Issue(
                 "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
                 f"「…{snippet[:24]}…」", m.group(0),
-                ("短词宽间隔（疑似签署页/排版用途，低级别提示）" if sev == "LOW"
-                 else "中文之间出现连续空格"),
-                "确认是否为刻意排版；否则删除多余空格", sev))
+                "中文之间出现连续空格",
+                "确认是否为刻意排版；否则删除多余空格", "HIGH"))
         for m in RE_DUP_CN_PUNCT.finditer(t):
             ctx_l = max(0, m.start() - 10)
             issues.append(Issue(
@@ -493,6 +499,9 @@ def check_spaces(items):
         for m in RE_DUP_HALF_PUNCT.finditer(t):
             if re.fullmatch(r"\.{3}|…+", m.group(0)):
                 continue  # 省略号
+            # 缩写固定用法豁免（2026-08-27 裁定）：Co.,Ltd. / Inc., 等
+            if m.group(0)[0] == "." and m.start() > 0 and t[m.start() - 1].isalpha():
+                continue
             ctx_l = max(0, m.start() - 10)
             issues.append(Issue(
                 "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
@@ -670,6 +679,10 @@ def check_amounts(items):
             seen.add(key)
             if DOC_CODE_RE.match(frag):
                 continue  # 文号/编码豁免（含日期连写，由 dates 项处理）
+            # 标准号豁免（2026-08-27 裁定）：GB/GB/T/ISO/Q/DB… 后接数字串属标准编号非金额
+            prefix = text[max(0, m.start() - 10):m.start()]
+            if re.search(r"[A-Za-z]{1,4}(?:/[A-Za-z]{1,4})?\s*$", prefix):
+                continue
             note = ""
             if len(frag) >= 8:
                 note = "（长数字串，若为文号/编码可忽略本条）"
@@ -751,21 +764,27 @@ def check_punctuation(items):
         t = info["text"]
         if not t:
             continue
+        # 英文缩写内部句点豁免（2026-08-27 裁定）：Inc./Ltd./Co. 后接中文等
+        abbrev_re = re.compile(
+            r"\b(?:Inc|Ltd|Co|Corp|No|Vol|Dr|Mr|Ms|St)\.\S{0,4}"
+            r"|\b[A-Z]{1,3}(?:\.[A-Z]{1,3})+\.\S{0,2}")
+        abbrev_spans = [(m.start(), m.end()) for m in abbrev_re.finditer(t)]
+
+        def in_abbrev(pos):
+            return any(a <= pos <= b for a, b in abbrev_spans)
+
         for k, ch in enumerate(t):
             if ch in half_set:
                 pc, _pj = _neighbor_class(t, k, -1)
                 nc, _nj = _neighbor_class(t, k, 1)
                 if pc == "C" or nc == "C":
+                    if ch == "." and in_abbrev(k):
+                        continue
                     add(kind, i, info, t, k, k + 1,
                         f"中文语境使用半角标点「{ch}」",
                         f"改为全角「{HALF_FULL_MAP.get(ch, '对应全角标点')}」")
-            elif ch in full_set:
-                pc, _pj = _neighbor_class(t, k, -1)
-                nc, _nj = _neighbor_class(t, k, 1)
-                if pc == "E" and nc == "E":
-                    add(kind, i, info, t, k, k + 1,
-                        f"英文/数字之间误用全角标点「{ch}」",
-                        f"改为半角「{FULL_HALF_MAP.get(ch, ',')}」")
+            # 2026-08-27 裁定：英英之间全角标点不再报——投行文件中文阅读习惯下
+            # （如「CPU，GPU」并列、简称「（GPT）」括注）全角即为规范；仅成段英文例外
 
         # 提示级：中文语境直排双引号
         dq_hits = [m.start() for m in re.finditer(r'"', t)]
@@ -975,9 +994,21 @@ def check_cross_table(tables):
 FONT_OK_SIZES = {21, 18}   # 半点值：21 = 10.5pt 五号；18 = 9pt 小五
 
 
+def _is_formal_data_table(tbl):
+    """正式数据表判定（2026-08-27 裁定）：行数≤2（封面提示框）或整表无数字
+    （签字页/人名表）不参照正文表格规范——豁免字号与对齐检查。"""
+    rows = tbl["rows"]
+    if len(rows) <= 2:
+        return False
+    joined = "".join(c["text"] for row in rows for c in row)
+    return bool(re.search(r"\d", joined))
+
+
 def check_table_font(tables):
     issues = []
     for tbl in tables:
+        if not _is_formal_data_table(tbl):
+            continue
         bad_by_size = Counter()
         example = None
         for ri, row in enumerate(tbl["rows"]):
@@ -1016,6 +1047,8 @@ def check_table_align(tables):
     examples = Counter()
     sample_cell = None
     for tbl in tables:
+        if not _is_formal_data_table(tbl):
+            continue
         for ri, row in enumerate(tbl["rows"]):
             for ci, cell in enumerate(row):
                 if ci == 0 or not _is_numeric_like(cell):
