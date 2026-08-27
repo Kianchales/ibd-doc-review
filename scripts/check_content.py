@@ -580,12 +580,36 @@ def check_abbr(doc_text):
     PAREN_SHORT_RE = re.compile(r"[（(]([\u4e00-\u9fff]{2,8})[）)]")
     PAREN_SKIP = {"以下简称", "转回", "转销", "续上表", "承上表"}
     KEYWORD_EXCLUDE = ("万元", "亿元", "年度", "期间", "所得税", "情况")
+    # 常见词白名单（2026-08-27 裁定：专业术语/地名/常规表述/数字无需定义，不视为疑似未定义简称）
+    ABBR_WHITELIST = {
+        # 投行专业术语
+        "独立董事", "草案", "主承销商", "董事长", "副董事长", "监事", "监事会",
+        "监事会主席", "职工代表监事", "股东大会", "董事会", "董事会秘书", "董秘",
+        "总经理", "财务总监", "独立财务顾问", "保荐机构", "联席保荐机构",
+        "承销商", "律师事务所", "会计师事务所", "律师", "会计师",
+        "审计委员会", "提名委员会", "薪酬与考核委员会", "战略委员会", "审核委员会",
+        "执行董事", "非执行董事", "高级管理人员", "核心技术人员", "控股股东",
+        "实际控制人", "关联方", "关联交易", "募集资金", "募集资金投资项目",
+        "招股说明书", "上市规则", "公司章程", "公司法", "证券法",
+        # 地名
+        "上海", "北京", "深圳", "广州", "杭州", "南京", "成都", "重庆", "武汉",
+        "西安", "天津", "苏州", "宁波", "青岛", "厦门", "长沙", "郑州", "济南",
+        "合肥", "福州", "昆明", "大连", "无锡", "佛山", "东莞", "珠海", "中山",
+        "境外", "境内", "中国大陆", "香港", "澳门", "台湾",
+        # 常规表述
+        "一级", "二级", "三级", "四级", "五级", "六级", "七级", "八级",
+        "高级", "中级", "初级", "个人", "单位", "金额", "数量", "比例",
+        "发行人", "公司", "集团", "企业",
+    }
+    CN_NUM_WORD = re.compile(r"^[一二三四五六七八九十百千两零]{2,8}$")  # 十三/十四/三十一等数字词
     paren_counts = Counter()
     for m in PAREN_SHORT_RE.finditer(doc_text):
         phrase = m.group(1)
-        if phrase in PAREN_SKIP or phrase in defs:
+        if phrase in PAREN_SKIP or phrase in defs or phrase in ABBR_WHITELIST:
             continue
         if any(k in phrase for k in KEYWORD_EXCLUDE):
+            continue
+        if CN_NUM_WORD.match(phrase):
             continue
         paren_counts[phrase] += 1
     for phrase, pc in paren_counts.most_common():
@@ -1109,7 +1133,11 @@ def check_table_align(tables):
 
 
 def check_table_empty(tables):
+    """空单元格（2026-08-27 裁定：不再逐表报警告，改为全文 1 条汇总提示）。"""
     issues = []
+    total_all = 0
+    affected = 0
+    table_names = []
     for tbl in tables:
         empty_rows = Counter()
         for ri, row in enumerate(tbl["rows"]):
@@ -1118,11 +1146,15 @@ def check_table_empty(tables):
                     empty_rows[(ri + 1)] += 1
         if empty_rows:
             total = sum(empty_rows.values())
-            detail = "、".join(f"行{r}×{c}" for r, c in sorted(empty_rows.items()))
-            issues.append(Issue(
-                "table_empty", "表格填写（提示）",
-                f"表{tbl['no']}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else "") + f"：{detail}",
-                f"空单元格共 {total} 个",
+            total_all += total
+            affected += 1
+            table_names.append(f"表{tbl['no']}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else ""))
+    if total_all:
+        detail_show = "、".join(table_names[:8]) + ("…等" if len(table_names) > 8 else "")
+        issues.append(Issue(
+            "table_empty", "表格空单元格（汇总提示）",
+            f"共 {affected} 张表、{total_all} 个空单元格：" + detail_show,
+            f"空单元格共 {total_all} 个（{affected} 张表）",
                 "如为无内容建议统一以「—」填充；确属留白可忽略", "LOW"))
     return issues
 
