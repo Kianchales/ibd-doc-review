@@ -81,12 +81,13 @@ def extract_structure(doc):
 
 
 class Issue:
-    def __init__(self, check, location, snippet, problem, suggestion=""):
+    def __init__(self, check, location, snippet, problem, suggestion="", hint=False):
         self.check = check
         self.location = location
         self.snippet = snippet
         self.problem = problem
         self.suggestion = suggestion
+        self.hint = hint          # True=提示级（不计入问题数，单独呈现）
 
 
 # ---------------------------------------------------------------- 1. 标题层级序号
@@ -121,6 +122,9 @@ def cn_to_int(s):
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
 NUM_PATTERNS = [
+    # 自定义编号体系（2026-08-27 裁定：级别高于「一、」，参与连续性判断）
+    ("C0", re.compile(r"^第\s*([一二三四五六七八九十百]+|\d+)\s*[章节]")),
+    ("A0", re.compile(r"^(?:问题|問题)\s*(\d{1,3})(?=$|[.．:：、\s])")),
     ("L1", re.compile(r"^([一二三四五六七八九十百]+)、")),
     ("L2", re.compile(r"^[（(]\s*([一二三四五六七八九十百]+)\s*[）)]")),
     ("L3", re.compile(r"^(\d{1,3})\s*[、．]")),
@@ -133,13 +137,13 @@ NUM_PATTERNS = [
 
 
 def parse_numbering(text):
-    """识别段落开头序号，返回 (level, 序号数值 int) 或 None。"""
+    """识别段落开头序号，返回 (level, 序号数值 int, 原始写法) 或 None。"""
     for idx, (level, pat) in enumerate(NUM_PATTERNS):
         m = pat.match(text)
         if m:
             raw = m.group(1)
-            if level in ("L1", "L2"):
-                val = cn_to_int(raw)
+            if level in ("L1", "L2", "C0"):
+                val = cn_to_int(raw) if not raw.isdigit() else int(raw)
             elif level == "L6":
                 val = CIRCLED.index(raw) + 1
             elif level in ("L7", "L8"):
@@ -152,7 +156,8 @@ def parse_numbering(text):
     return None
 
 
-LEVEL_NAMES = {"L1": "一级（一、）", "L2": "二级（（一））", "L3": "三级（1、）",
+LEVEL_NAMES = {"C0": "自定义级（第X节/第X章）", "A0": "自定义级（问题X）",
+               "L1": "一级（一、）", "L2": "二级（（一））", "L3": "三级（1、）",
                "L4": "四级（（1））", "L5": "五级（1））", "L6": "六级（①）",
                "L7": "七级（A、）", "L8": "八级（a、）"}
 ALL_LEVELS = list(LEVEL_NAMES.keys())
@@ -403,6 +408,36 @@ def check_abbr(doc_text):
                                 f"已定义简称，其后仍以全称出现 {later_count} 次",
                                 f"建议统一切换为简称「{short}」"))
 
+    # 定义前使用（2026-08-27 裁定：简称须先定义后使用）
+    for short, pairs in sorted(defs.items()):
+        first_def_at = min(p[1] for p in pairs)
+        pre_count = doc_text.count(short, 0, first_def_at)
+        if pre_count > 0:
+            issues.append(Issue("释义简称", f"简称「{short}」首次定义前",
+                                short,
+                                f"首次定义（约偏移{first_def_at}）之前已独立出现 {pre_count} 次",
+                                "投行惯例简称应在首次全称处即时定义，请核实前置出现是否需要补定义或改写"))
+
+    # 疑似未定义简称：括号内纯中文短语，未被「以下简称」定义，但在正文高频独立复用
+    PAREN_SHORT_RE = re.compile(r"[（(]([\u4e00-\u9fff]{2,8})[）)]")
+    PAREN_SKIP = {"以下简称", "转回", "转销", "续上表", "承上表"}
+    PAREN_KEYWORD_EXCLUDE = ("万元", "亿元", "年度", "期间", "所得税", "情况")
+    paren_counts = Counter()
+    for m in PAREN_SHORT_RE.finditer(doc_text):
+        phrase = m.group(1)
+        if phrase in PAREN_SKIP or phrase in defs:
+            continue
+        if any(k in phrase for k in PAREN_KEYWORD_EXCLUDE):
+            continue
+        paren_counts[phrase] += 1
+    for phrase, pc in paren_counts.most_common():
+        reuse = doc_text.count(phrase) - pc  # 括号外独立复用次数
+        if pc >= 1 and reuse >= 2:
+            issues.append(Issue("释义简称", "全文",
+                                phrase,
+                                f"括号注释短语「{phrase}」（{pc} 处）在正文中独立复用 {reuse} 次，未见「以下简称」定义",
+                                "若作为简称使用，建议补充规范定义（如「XXX（以下简称『" + phrase + "』）」）；若非简称可忽略", hint=True))
+
     # 引号风格混用
     if len(quote_styles) > 1:
         issues.append(Issue("释义简称", "全文",
@@ -528,6 +563,11 @@ def check_tables(doc):
         notes = []
         if empty_cells:
             notes.append(f"空单元格 {empty_cells} 个")
+        if empty_cells:
+            # 2026-08-27 裁定：空单元格属提示级，不计入问题
+            issues.append(Issue("表格填写", f"表{tn}", "",
+                                f"空单元格 {empty_cells} 个",
+                                "如为「无内容」建议统一以「—」等符号填充；确属留白可忽略", hint=True))
         if space_cells:
             issues.append(Issue("表格填写", f"表{tn}", "",
                                 f"{space_cells} 个单元格文本带首尾空格", "建议去除首尾空格"))
@@ -548,7 +588,10 @@ def check_tables(doc):
         if notes:
             stats.append((tn, notes))
         elif total_cells:
-            stats.append((tn, [f"共 {total_cells} 单元格，未见填写问题"]))
+            note_txt = f"共 {total_cells} 单元格"
+            if empty_cells:
+                note_txt += f"，含空单元格 {empty_cells} 个（提示级）"
+            stats.append((tn, [note_txt + "，未见填写问题"]))
     return issues, stats
 
 
@@ -606,15 +649,19 @@ def render_report(base, sections, all_issues):
     lines.append("")
     lines.append("## 核对总览")
     lines.append("")
-    lines.append("| 核对项 | 问题/提示条数 |")
-    lines.append("|--------|--------------|")
+    lines.append("| 核对项 | 问题 | 提示 |")
+    lines.append("|--------|------|------|")
+    total_p, total_h = 0, 0
     for name, res in sections.items():
         if name == "_table_stats":
             continue
         label = name.split(". ", 1)[-1]
-        lines.append(f"| {label} | {len(res)} |")
-    by_check = Counter(i.check for i in all_issues)
-    lines.append("| **合计** | **{}** |".format(len(all_issues)))
+        n_issue = sum(1 for it in res if not it.hint)
+        n_hint = sum(1 for it in res if it.hint)
+        total_p += n_issue
+        total_h += n_hint
+        lines.append(f"| {label} | {n_issue} | {n_hint} |")
+    lines.append(f"| **合计** | **{total_p}** | **{total_h}** |")
     lines.append("")
     lines.append("> 说明：标注「疑似/请人工确认」的条目为机器初筛结果，需人工复核定性。")
     lines.append("")
@@ -641,8 +688,9 @@ def render_report(base, sections, all_issues):
         lines.append("|---|------|----------|------|------|")
         for idx, it in enumerate(res, 1):
             esc = lambda s: s.replace("|", "\\|").replace("\n", " ")
+            tag = "【提示】" if it.hint else ""
             lines.append(f"| {idx} | {esc(it.location)} | {esc(it.snippet)} | "
-                         f"{esc(it.problem)} | {esc(it.suggestion)} |")
+                         f"{tag}{esc(it.problem)} | {esc(it.suggestion)} |")
         lines.append("")
     return "\n".join(lines)
 
@@ -672,12 +720,16 @@ def main():
         with open(out, "w", encoding="utf-8") as fh:
             fh.write(report)
         print(f"\n=== 格式核对：{os.path.basename(f)} ===")
+        tp = th = 0
         for name, res in sections.items():
             if name == "_table_stats":
                 continue
-            mark = "✅" if not res else f"⚠️ {len(res)} 条"
+            ni = sum(1 for x in res if not x.hint)
+            nh = sum(1 for x in res if x.hint)
+            tp += ni; th += nh
+            mark = f"⚠️ 问题 {ni} / 提示 {nh}" if res else "✅"
             print(f"  {name}: {mark}")
-        print(f"  合计问题/提示：{len(all_issues)} 条")
+        print(f"  合计：问题 {tp} 条，提示 {th} 条")
         # 控制台输出问题明细（每项最多 8 条）
         shown = 0
         for it in all_issues:
@@ -685,7 +737,8 @@ def main():
                 print(f"  …… 其余 {len(all_issues) - shown} 条见报告")
                 break
             note = f"（{it.suggestion}）" if it.suggestion else ""
-            print(f"  [{it.check}] {it.location} | {it.snippet[:30]} | {it.problem}{note}")
+            tag2 = "提示" if it.hint else "问题"
+            print(f"  [{it.check}]（{tag2}）{it.location} | {it.snippet[:30]} | {it.problem}{note}")
             shown += 1
         print(f"  → 报告已写入：{out}")
 
