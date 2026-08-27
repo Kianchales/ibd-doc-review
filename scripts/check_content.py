@@ -1,27 +1,44 @@
 #!/usr/bin/env python3
-"""IPO 文档基本格式核对（只读，不改文件）。
+"""IPO 文档基本格式核对 v2（只读，不改文件）。
 
-六大核对项：
-  1. 标题层级序号：序号链连续统一，无跳号、无重号
-  2. 金额数字：千分位分隔符 + 保留两位小数
-  3. 日期写法：多种写法并存时报主导写法与其他实例
-  4. 释义/简称：定义唯一性、定义后全称复用提示、引号风格
-  5. 中英文标点：中文语境半角标点、字母数字间全角标点、括号混用
-  6. 表格填写：空单元格、不适用符号统一性、单元格首尾空格
+按「问题类型 × 严重程度」组织：HIGH=错误（须改）/ MEDIUM=警告 / LOW=提示。
+
+组别与核对项：
+  text  文字类：
+        heading_seq 标题层级序号连续性（含 第X节/第X章、问题X 自定义编号）   HIGH
+        terms       用词规范性（错别字/异形词；支持外部清单扩展）            MEDIUM
+        dates       日期写法统一（中文/分隔符/斜杠/连写/英文月缩写/年月）      MEDIUM
+        spaces      多余空格与重复标点                                    HIGH
+        abbr        释义简称统一（冲突/前置使用/未定义复用/引号风格）          MEDIUM-LOW
+        geo         国家城市表述合规（--geo-file 外部清单驱动）              HIGH
+  data  数据类：
+        amounts     金额千分位与两位小数（豁免 %、文号/编码）                MEDIUM
+        consistency 同名指标数值前后一致                                  MEDIUM
+        calc        表格合计行求和 / 占比列合计≈100%                       HIGH
+        cross_table 跨表同名科目数值比对                                  MEDIUM
+  table 表格类：
+        table_font  字号体系（五号21pt/小五18pt，其余违规）                 HIGH
+        table_align 数字单元格右对齐                                    MEDIUM
+        table_empty 空单元格                                           LOW
+        table_na    「不适用」标记统一性                                 MEDIIUM
 
 用法：
-  python check_content.py --input <docx> [--output <核对报告.md>] [--checks 123456]
-
-输出：控制台摘要 + Markdown 核对报告（默认 <input>_格式核对报告.md）
+  python check_content.py --input <docx> [--output 报告.md]
+      [--checks all | text | data | table | heading_seq,calc,...]
 """
 
 import argparse
+import datetime
 import glob
+import json
 import os
 import re
 import sys
 import zipfile
 from collections import Counter
+
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TERM_RULES_FILE = os.path.join(SKILL_DIR, "references", "term_rules.json")
 
 # ---------------------------------------------------------------- 基础解析
 
@@ -33,8 +50,6 @@ def load_docx(path):
             out = {}
             if "word/document.xml" in names:
                 out["word/document.xml"] = z.read("word/document.xml").decode("utf-8", errors="ignore")
-            if "word/settings.xml" in names:
-                out["word/settings.xml"] = z.read("word/settings.xml").decode("utf-8", errors="ignore")
             return out or None
     except Exception as e:
         print(f"[ERROR] 读取失败 {path}: {e}")
@@ -44,68 +59,99 @@ def load_docx(path):
 PARA_RE = re.compile(r"<w:p\b[^>]*>.*?</w:p>", re.S)
 CELL_RE = re.compile(r"<w:tc\b[^>]*>.*?</w:tc>", re.S)
 TBL_RE = re.compile(r"<w:tbl\b[^>]*>.*?</w:tbl>", re.S)
+ROW_RE = re.compile(r"<w:tr\b[^>]*>.*?</w:tr>", re.S)
 
 
 def _text_of(fragment):
     return "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", fragment))
 
 
+class Issue:
+    def __init__(self, check_id, check_name, location, snippet, problem,
+                 suggestion="", severity="MEDIUM"):
+        self.check_id = check_id
+        self.check_name = check_name
+        self.location = location
+        self.snippet = snippet
+        self.problem = problem
+        self.suggestion = suggestion
+        self.severity = severity
+
+
+SEV_ORDER = ["HIGH", "MEDIUM", "LOW"]
+SEV_LABEL = {"HIGH": "错误", "MEDIUM": "警告", "LOW": "提示"}
+
+
+def _para_info(body):
+    ppr_m = re.search(r"<w:pPr\b[^>]*>.*?</w:pPr>", body, re.S)
+    ppr = ppr_m.group(0) if ppr_m else None
+    st = re.search(r'<w:pStyle w:val="([^"]+)"', ppr or "")
+    jc = re.search(r'<w:jc w:val="([^"]+)"', ppr or "")
+    return {
+        "style": st.group(1) if st else None,
+        "align": jc.group(1) if jc else None,
+        "text": "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body)).strip(),
+    }
+
+
 def extract_structure(doc):
-    """提取文档结构序列 [(kind, text, extra)]：
-    kind ∈ body（正文段落）/ cell（表格单元格）；cell 的 extra 为表格序号（从 1 起）。
-    顺序：按文档中各元素出现位置排列；表格内段落统一归为 cell。"""
     items = []
-    tbl_spans = [(m.start(), m.end()) for m in TBL_RE.finditer(doc)]
     cell_spans = [(m.start(), m.end()) for m in CELL_RE.finditer(doc)]
+    tbl_spans = [(m.start(), m.end()) for m in TBL_RE.finditer(doc)]
     para_spans = [(m.start(), m.end()) for m in PARA_RE.finditer(doc)]
 
     def table_no(pos):
         return sum(1 for ms, me in tbl_spans if ms <= pos)
 
-    consumed = set()
-    events = []  # (start, end, kind, extra)
-    # 表格整体占位的事件用于吞掉内部段落判定
     for ps, pe in para_spans:
-        key = (ps, pe)
-        if key in consumed:
-            continue
         in_cell = any(cs <= ps and pe <= ce for cs, ce in cell_spans)
-        t = _text_of(doc[ps:pe]).strip()
+        info = _para_info(doc[ps:pe])
         if in_cell:
-            events.append((ps, pe, "cell", table_no(ps), t))
+            info["kind"] = "cell"
+            info["table_no"] = table_no(ps)
         else:
-            events.append((ps, pe, "body", None, t))
-        consumed.add(key)
-    events.sort(key=lambda e: e[0])
-    return [(kind, text, extra) for _, _, kind, extra, text in events]
+            info["kind"] = "body"
+        items.append((info["kind"], info))
+    return items
 
 
-class Issue:
-    def __init__(self, check, location, snippet, problem, suggestion="", hint=False):
-        self.check = check
-        self.location = location
-        self.snippet = snippet
-        self.problem = problem
-        self.suggestion = suggestion
-        self.hint = hint          # True=提示级（不计入问题数，单独呈现）
+def full_text_of(doc):
+    return "\n".join(_text_of(m.group(0)) for m in PARA_RE.finditer(doc))
 
 
-# ---------------------------------------------------------------- 1. 标题层级序号
+def parse_tables(doc):
+    tables = []
+    for tn, tm in enumerate(TBL_RE.finditer(doc), 1):
+        rows = []
+        for rm in ROW_RE.finditer(tm.group(0)):
+            cells = []
+            for cm in CELL_RE.finditer(rm.group(0)):
+                cxml = cm.group(0)
+                sizes = sorted({int(v) for v in re.findall(r'<w:sz w:val="(\d+)"', cxml)})
+                paras = [_para_info(pb.group(0)) for pb in PARA_RE.finditer(cxml)]
+                raw_text = _text_of(cxml).strip()
+                cells.append({"text": raw_text,
+                              "raw": "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", cxml)),
+                              "sizes": sizes, "paras": paras})
+            rows.append(cells)
+        tables.append({"no": tn, "rows": rows})
+    return tables
+
+
+# ---------------------------------------------------------------- 中文数字与序号
 
 _CN_UNITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
 def cn_to_int(s):
-    """中文数字（简体，支持 一~九十九）转 int；失败返回 None。"""
+    s = s.strip()
     if not s:
         return None
-    s = s.strip()
     if s == "十":
         return 10
     if len(s) == 1:
-        v = _CN_UNITS.get(s)
-        return v
+        return _CN_UNITS.get(s)
     if s.startswith("十"):
         rest = s[1:]
         return 10 + (_CN_UNITS.get(rest, 0) if rest else 0)
@@ -116,55 +162,71 @@ def cn_to_int(s):
         if av is None:
             return None
         return av * 10 + bv
+    if s.endswith("百"):
+        av = _CN_UNITS.get(s[:-1])
+        return av * 100 if av is not None else None
     return _CN_UNITS.get(s)
 
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
-NUM_PATTERNS = [
-    # 自定义编号体系（2026-08-27 裁定：级别高于「一、」，参与连续性判断）
-    ("C0", re.compile(r"^第\s*([一二三四五六七八九十百]+|\d+)\s*[章节]")),
-    ("A0", re.compile(r"^(?:问题|問题)\s*(\d{1,3})(?=$|[.．:：、\s])")),
-    ("L1", re.compile(r"^([一二三四五六七八九十百]+)、")),
-    ("L2", re.compile(r"^[（(]\s*([一二三四五六七八九十百]+)\s*[）)]")),
-    ("L3", re.compile(r"^(\d{1,3})\s*[、．]")),
-    ("L4", re.compile(r"^[（(]\s*(\d{1,3})\s*[）)]")),
-    ("L5", re.compile(r"^(\d{1,3})\s*[）)]")),
-    ("L6", re.compile(r"^([①-⑳])")),
-    ("L7", re.compile(r"^([A-Z])\s*[、．.]")),
-    ("L8", re.compile(r"^([a-z])\s*[、．.]")),
+CN_CHAPTER_RE = re.compile(r"^第\s*([一二三四五六七八九十百]+|\d+)\s*[章节篇]")
+PROBLEM_NUM_RE = re.compile(r"^问题\s*(\d{1,3})(?=$|[.．:：、\s（(])")
+LEVEL_RES = [
+    ("L1", re.compile(r"^([一二三四五六七八九十百]+)、"), "cn"),
+    ("L2", re.compile(r"^[（(]\s*([一二三四五六七八九十百]+)\s*[）)]"), "cn"),
+    ("L3", re.compile(r"^(\d{1,3})\s*[、．]"), "num"),
+    ("L4", re.compile(r"^[（(]\s*(\d{1,3})\s*[）)]"), "num"),
+    ("L5", re.compile(r"^(\d{1,3})\s*[）)]"), "num"),
+    ("L6", re.compile(r"^([①-⑳])"), "circled"),
+    ("L7", re.compile(r"^([A-Z])\s*[、．.]"), "alpha_up"),
+    ("L8", re.compile(r"^([a-z])\s*[、．.]"), "alpha_lo"),
 ]
-
-
-def parse_numbering(text):
-    """识别段落开头序号，返回 (level, 序号数值 int, 原始写法) 或 None。"""
-    for idx, (level, pat) in enumerate(NUM_PATTERNS):
-        m = pat.match(text)
-        if m:
-            raw = m.group(1)
-            if level in ("L1", "L2", "C0"):
-                val = cn_to_int(raw) if not raw.isdigit() else int(raw)
-            elif level == "L6":
-                val = CIRCLED.index(raw) + 1
-            elif level in ("L7", "L8"):
-                val = ord(raw) - (ord("A") if level == "L7" else ord("a")) + 1
-            else:
-                val = int(raw)
-            if val is None or val <= 0:
-                return None
-            return (level, val, raw)
-    return None
-
-
-LEVEL_NAMES = {"C0": "自定义级（第X节/第X章）", "A0": "自定义级（问题X）",
-               "L1": "一级（一、）", "L2": "二级（（一））", "L3": "三级（1、）",
-               "L4": "四级（（1））", "L5": "五级（1））", "L6": "六级（①）",
-               "L7": "七级（A、）", "L8": "八级（a、）"}
+LEVEL_NAMES = {
+    "C0": "章/节编号（第X节/第X章）",
+    "P0": "问题编号（问题X）",
+    "L1": "一级（一、）", "L2": "二级（（一））", "L3": "三级（1、）",
+    "L4": "四级（（1））", "L5": "五级（1））", "L6": "六级（①）",
+    "L7": "七级（A、）", "L8": "八级（a、）",
+}
 ALL_LEVELS = list(LEVEL_NAMES.keys())
 
 
+def parse_numbering(text):
+    """识别段落开头序号 → (level, value:int, raw)。"""
+    m = CN_CHAPTER_RE.match(text)
+    if m:
+        raw = m.group(1)
+        val = int(raw) if raw.isdigit() else cn_to_int(raw)
+        if val and val > 0:
+            return ("C0", val, raw)
+    m = PROBLEM_NUM_RE.match(text)
+    if m:
+        return ("P0", int(m.group(1)), m.group(1))
+    for level, pat, kind in LEVEL_RES:
+        m = pat.match(text)
+        if m:
+            raw = m.group(1)
+            if kind == "cn":
+                val = cn_to_int(raw)
+            elif kind == "circled":
+                val = CIRCLED.index(raw) + 1
+            elif kind == "alpha_up":
+                val = ord(raw) - ord("A") + 1
+            elif kind == "alpha_lo":
+                val = ord(raw) - ord("a") + 1
+            else:
+                val = int(raw)
+            if val is not None and val > 0:
+                return (level, val, raw)
+    return None
+
+
 def _disp_num(level, val):
-    """层级内数值按其书写体系显示：中文层（一、/（一））转中文数字，其余阿拉伯。"""
+    if level == "C0":
+        return str(val)
+    if level == "P0":
+        return str(val)
     if level in ("L1", "L2"):
         if val <= 10:
             return ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"][val]
@@ -176,201 +238,231 @@ def _disp_num(level, val):
     return str(val)
 
 
-def check_heading_sequence(items):
-    """层次感知的序号连续性核对：同层须递增 +1；进入更低层重新起 1；回到高层按其自身序列续。"""
+# ---------------------------------------------------------------- 核对项：文字类
+
+
+def check_heading_seq(items):
+    """标题层级序号连续性（层次感知）。"""
     issues = []
-    seq_no = 0
-    prev_level_i = -1
-    prev_num = None
+    prev_li = -1
+    prev_val = None
     last_at_level = {}
-    for kind, text, extra in items:
-        if kind != "body" or not text:
+    seq_no = 0
+    for kind, info in items:
+        if kind != "body" or not info["text"]:
             continue
-        parsed = parse_numbering(text)
+        parsed = parse_numbering(info["text"])
         if not parsed:
             continue
         seq_no += 1
         level, val, raw = parsed
-        loc = f"序号段#{seq_no}「{text[:18]}」"
+        name = LEVEL_NAMES[level]
+        loc = f"{name}#{seq_no}「{info['text'][:20]}」"
         li = ALL_LEVELS.index(level)
-        disp_prev = _disp_num(level, prev_num) if prev_num else None
-        disp_exp = _disp_num(level, (prev_num or 0) + 1)
-        if prev_level_i == -1:
-            if val != 1:
-                issues.append(Issue("标题序号", loc, text[:40],
-                                    f"{LEVEL_NAMES[level]}首个序号为 {raw}（应为起始值 1/一）"))
-        elif li == prev_level_i:
-            expected = (prev_num or 0) + 1
+        if li == prev_li:
+            expected = (prev_val or 0) + 1
             if val != expected:
-                kind_str = "重号" if val == prev_num else ("跳号" if val > expected else "倒退/重号")
-                exp_disp = _disp_num(level, expected)
-                issues.append(Issue("标题序号", loc, text[:40],
-                                    f"{LEVEL_NAMES[level]}序号「{raw}」，前一号为「{disp_prev}」，{kind_str}（应连续，期望「{exp_disp}」）"))
+                kind_str = ("重号" if val == prev_val else
+                            "跳号" if val > expected else "倒退")
+                issues.append(Issue(
+                    "heading_seq", name, loc, info["text"][:40],
+                    f"序号「{raw}」，前一号为「{_disp_num(level, prev_val)}」，{kind_str}",
+                    f"应连续，期望「{_disp_num(level, expected)}」", "HIGH"))
+        elif li > prev_li:
+            if val != 1 and val != 0:
+                issues.append(Issue(
+                    "heading_seq", name, loc, info["text"][:40],
+                    f"降入该层级时首个序号为「{raw}」（应为起始值 1/一）", "", "HIGH"))
         else:
-            # 层级切换：更低层重新起 1；更高层按其自身上一值续
-            if li > prev_level_i:
-                if val != 1:
-                    issues.append(Issue("标题序号", loc, text[:40],
-                                        f"降入{LEVEL_NAMES[level]}，首个序号为 {raw}（应为起始值 1/一）"))
-            else:
-                last_here = last_at_level.get(level)
-                if last_here is not None and val != last_here + 1:
-                    kind_str = "重号" if val == last_here else ("跳号" if val > last_here + 1 else "倒退/重号")
-                    issues.append(Issue("标题序号", loc, text[:40],
-                                        f"回升至{LEVEL_NAMES[level]}，序号 {raw}，上次该级为 {last_here}，{kind_str}"))
-        prev_level_i = li
-        prev_num = val
+            last_here = last_at_level.get(level)
+            if last_here is not None and val != last_here + 1:
+                kind_str = ("重号" if val == last_here else
+                            "跳号" if val > last_here + 1 else "倒退")
+                issues.append(Issue(
+                    "heading_seq", name, loc, info["text"][:40],
+                    f"回升至该层级，序号「{raw}」，上次为「{_disp_num(level, last_here)}」，{kind_str}",
+                    f"期望「{_disp_num(level, last_here + 1)}」", "HIGH"))
+        prev_li = li
+        prev_val = val
         last_at_level[level] = val
     return issues
 
 
-# ---------------------------------------------------------------- 2. 金额数字
+# ---- terms 用词规范
 
-RE_NO_THOUSANDS = re.compile(r"(?<![\d,.%])(\d{5,9})(?=元|万元|亿元|[^\d]|$)")
-RE_BAD_DECIMALS = re.compile(r"\d{1,3}(?:,\d{3})+\.(\d)(?![\d])")
-RE_DOC_CODE = re.compile(r"^\d{6,8}$")  # 豁免：文号/编码类 6~8 位纯数字
+def load_external_rules(path):
+    """外部术语规则清单 JSON：[{"pattern":"...","problem":"...","suggestion":"..."}]。"""
+    if path and os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return [(r.get("pattern", ""), r.get("problem", ""), r.get("suggestion", ""))
+                    for r in data if isinstance(r, dict) and r.get("pattern")]
+        except Exception as e:
+            print(f"[WARN] 术语清单读取失败({path}): {e}")
+    return []
 
 
-def _is_percent_after(text, end):
-    """命中片段之后（允许一个空格）紧跟百分号 → 比例，豁免。"""
-    tail = text[end:].lstrip(" ")
-    return tail.startswith("%")
+BUILTIN_TERM_RULES = [
+    {"pattern": r"帐[面户务套]", "problem": "'帐'应为'账'（账面/账户/账务/账套）",
+     "suggestion": "统一使用'账'"},
+    {"pattern": r"(?<!可)其它(?=[^\u4e00-\u9fff]|$)", "problem": "'其它'宜规范为'其他'",
+     "suggestion": "统一使用'其他'"},
+]
 
 
-def check_amounts(items):
+def check_terms(doc_text, term_rules=None):
+    rules = list(BUILTIN_TERM_RULES)
+    rules += [(r["pattern"], r["problem"], r["suggestion"]) for r in (term_rules or [])]
     issues = []
-    counter = 0
-    seen_positions = set()
-    for i, (kind, text, extra) in enumerate(items):
-        if not text:
+    reported = Counter()
+    for rule in rules:
+        pat, problem, suggestion = rule
+        try:
+            rx = re.compile(pat)
+        except re.error:
             continue
-        # 预剥离百分比片段（豁免：比例数值不作千分位/两位小数要求）
-        work_text = re.sub(r"\d+(?:[,.]\d+)*\s*%", lambda mm: "%" * len(mm.group(0)), text)
-        for pat, tag, msg in (
-            (RE_NO_THOUSANDS, "无千分位", "5 位以上数字未加千分位分隔符"),
-            (RE_BAD_DECIMALS, "小数位不足", "带千分位的金额小数位不足两位"),
-        ):
-            for m in pat.finditer(work_text):
-                frag = m.group(0)
-                key = (i, frag, m.start())
-                if key in seen_positions:
-                    continue
-                seen_positions.add(key)
-                counter += 1
-                ctx_l = max(0, m.start() - 14)
-                snippet = text[ctx_l:m.end() + 8]
-                note = ""
-                if tag == "无千分位":
-                    if RE_DOC_CODE.match(frag):
-                        note = ""
-                        counter -= 1
-                        seen_positions.discard(key)
-                        continue  # 豁免：6~8 位视为文号/编码（含日期连写，由第 3 项核对处理）
-                    if len(frag) >= 8:
-                        note = "（长数字串，若为文号/编码可忽略本条）"
-                loc = ("表格" if kind == "cell" else "正文") + \
-                      (f"表{extra}" if kind == "cell" else f"第{i + 1}段") + f"「…{snippet[:26]}…」"
-                issues.append(Issue("金额数字", loc, frag, msg, note))
+        hits = list(rx.finditer(doc_text))
+        shown = 0
+        for m in hits:
+            reported[pat] += 1
+            shown += 1
+            if shown > 3:
+                break
+            near_l = max(0, m.start() - 12)
+            snippet = doc_text[near_l:m.end() + 12].replace("\n", "")
+            issues.append(Issue("terms", "用词规范",
+                                f"全文出现 {len(hits)} 次，示例：「…{snippet[:26]}…」",
+                                f"{problem}（命中「{m.group(0)[:16]}」）",
+                                suggestion or "", "MEDIUM"))
     return issues
 
 
-# ---------------------------------------------------------------- 3. 日期写法
+# ---- dates
 
-RE_D_SEQ = re.compile(r"(?<![\d.])(20\d{2}\s*[．.\-/]\s*\d{1,2}\s*[．.\-/]\s*\d{1,2})(?!\d)")
-RE_D_COMPACT = re.compile(r"(?<![\d.])((?:19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01]))(?!\d)")
-RE_D_CN = re.compile(r"(20\d{2}年\d{1,2}月\d{1,2}日?)")
-RE_D_SLASH = re.compile(r"(?<![\d./])(20\d{2}/\d{1,2}/\d{1,2})(?![\d./])")
-
-
-def normalize_seq(s):
-    parts = re.split(r"\s*[．.\-/]\s*", s.strip())
-    if len(parts) != 3:
-        return None
-    y, mo, d = parts
-    try:
-        return f"{int(y)}-{int(mo):02d}-{int(d):02d}"
-    except ValueError:
-        return None
-
-
-def norm_compact(s):
-    if len(s) != 8:
-        return None
-    try:
-        return f"{int(s[:4])}-{int(s[4:6]):02d}-{int(s[6:]):02d}"
-    except ValueError:
-        return None
-
-
-def norm_cn(s):
-    m = re.match(r"(20\d{2})年(\d{1,2})月(\d{1,2})日?", s)
-    if not m:
-        return None
-    return f"{int(m.group(1))}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+MONTH_EN = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+DATE_FORMS = [
+    ("中文 年月日（2024年6月30日）", re.compile(r"20\d{2}年\d{1,2}月\d{1,2}日?")),
+    ("中文 年月（2024年6月）", re.compile(r"20\d{2}年\d{1,2}月(?![\d一二三四五六七八九十]{1,3}日)")),
+    ("横线年月日（2024-06-30）", re.compile(r"(?<![\d./-])20\d{2}-\d{1,2}-\d{1,2}(?![\d.-])")),
+    ("点分隔年月日（2024.6.30）", re.compile(r"(?<![\d./-])20\d{2}\.\d{1,2}\.\d{1,2}(?![\d.-])")),
+    ("斜杠年月日（2024/06/30）", re.compile(r"(?<![\d./-])20\d{2}/\d{1,2}/\d{1,2}(?![\d./-])")),
+    ("横线年月（2024-06）", re.compile(r"(?<![\d./-])20\d{2}-\d{2}(?![-\d])")),
+    ("连写式 YYYYMMDD（20240630）", re.compile(r"(?<![\d.])(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)")),
+    ("英文月缩写（Jun 2024 / Jun 30, 2024）",
+     re.compile(rf"\b(?:{MONTH_EN})\.?,?(?:\s+\d{{1,2}},)?\s*20\d{{2}}\b|\b20\d{{2}},?\s+(?:{MONTH_EN})\.?\s+\d{{1,2}}\b", re.I)),
+    ("美式 月/日/年（06/30/2024）", re.compile(r"(?<![\d/.])(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])/20\d{2}(?![\d/.])")),
+    ("英文 年月（2024-05）", re.compile(r"(?<![\d./-])20\d{2}-(?:0[1-9]|1[0-2])(?![-\d])(?=\D|$)")),
+]
 
 
 def check_dates(items):
-    forms = {
-        "连写式 YYYYMMDD": RE_D_COMPACT,
-        "点/横线分隔式": RE_D_SEQ,
-        "斜杠式 YYYY/M/D": RE_D_SLASH,
-        "中文式 年月日": RE_D_CN,
-    }
     counters = Counter()
     samples = {}
-    detail_rows = []
-    n = 0
-    for i, (kind, text, extra) in enumerate(items):
-        if not text:
+    for i, (kind, info) in enumerate(items):
+        t = info["text"]
+        if not t:
             continue
-        for fname, pat in forms.items():
-            for m in pat.finditer(text):
-                raw = m.group(0)
-                counters[fname] += 1
-                n += 1
-                samples.setdefault(fname, []).append((i, kind, extra, raw))
-    if n == 0:
-        return []
-    dominant, dom_count = counters.most_common(1)[0]
+        for fname, pat in DATE_FORMS:
+            hits = pat.findall(t)
+            if hits:
+                counters[fname] += len(hits)
+                samples.setdefault(fname, []).append((i, kind, info, t))
+
     issues = []
-    inconsistent_forms = {f: c for f, c in counters.items() if f != dominant and c > 0}
-    if len(counters) > 1:
+    if not counters:
+        return issues
+    dominant, dom_n = counters.most_common(1)[0]
+    others = {f: c for f, c in counters.items() if f != dominant}
+    if others:
+        others_str = "、".join(f"{f}×{c}" for f, c in sorted(others.items(), key=lambda x: -x[1]))
         issues.append(Issue(
-            "日期写法", "全文",
-            "、".join(f"{f}×{c}" for f, c in counters.most_common()),
-            f"存在多种日期写法；主导为「{dominant}」（{dom_count} 处），其余共 {sum(inconsistent_forms.values())} 处",
-            f"建议统一为「{dominant}」并列出少数派清单供修改"))
+            "dates", "日期写法统一", "全文",
+            f"主导「{dominant}」×{dom_n}；其余 {others_str}",
+            f"建议全文统一为「{dominant}」，少数派明细如下", "MEDIUM"))
+        for fname, lst in samples.items():
+            if fname == dominant or len(issues) > 120:
+                continue
+            shown_loc = set()
+            for (i, kind, info, t) in lst:
+                pat = dict(DATE_FORMS)[fname]
+                m = pat.search(t)
+                if not m:
+                    continue
+                ctx_l = max(0, m.start() - 12)
+                loc = ("表格" if kind == "cell" else "正文") + \
+                      (f"表{info['table_no']}" if kind == "cell" else f"#{i + 1}") + \
+                      f"「…{t[ctx_l:m.end() + 8]}…」"
+                if loc in shown_loc:
+                    continue
+                shown_loc.add(loc)
+                issues.append(Issue("dates", "日期写法统一", loc, m.group(0),
+                                    "非主流写法", f"建议改为「{dominant}」", "LOW"))
+                if len(shown_loc) >= 8:
+                    break
 
-    # 分隔符内部一致性："."、"-"、"–" 是否混用
-    seps = Counter()
-    sep_samples = {}
-    for i, (kind, text, extra) in enumerate(items):
-        if not text:
-            continue
-        for m in RE_D_SEQ.finditer(text):
-            sep = re.search(r"[．.\-/]", m.group(0))
-            if sep:
-                sp = "." if sep.group(0) in ".．" else sep.group(0)
-                key = "点分隔(.)" if sp == "." else ("横线分隔(-)" if sp == "-" else f"其他({sp})")
-                seps[key] += 1
-                sep_samples.setdefault(key, (i, kind, extra, m.group(0)))
-    if len(seps) > 1:
-        issues.append(Issue("日期写法", "全文",
-                            "、".join(f"{k}×{v}" for k, v in seps.most_common()),
-                            "同为分隔符式日期但分隔符不统一", "建议统一分隔符"))
-
-    # 少数派实例明细
-    for fname, lst in samples.items():
-        if fname == dominant:
-            continue
-        for (i, kind, extra, raw) in lst[:40]:
-            loc = ("表格" if kind == "cell" else "正文") + (f"表{extra}" if kind == "cell" else f"第{i + 1}段")
-            issues.append(Issue("日期写法", loc, raw,
-                                f"非主导写法（主导：{dominant}）", "建议改为统一写法"))
+    sep_counter = Counter()
+    sep_sample = {}
+    for i, (kind, info) in enumerate(items):
+        t = info["text"]
+        for m in re.finditer(r"20\d{2}\s*([．.\-/])\s*\d{1,2}", t):
+            sp = "." if m.group(1) in ".．" else m.group(1)
+            key = "点分隔(.)" if sp == "." else "横线分隔(-)" if sp == "-" else f"其他({sp})"
+            sep_counter[key] += 1
+            sep_sample.setdefault(key, i)
+    if len(sep_counter) > 1:
+        issues.append(Issue(
+            "dates", "日期写法统一", "全文",
+            "分隔符不统一：" + "、".join(f"{k}×{v}" for k, v in sep_counter.most_common()),
+            "建议统一分隔符",
+            f"各形式首现位置示例：{sorted(set(sep_sample.values()))}", "LOW"))
     return issues
 
 
-# ---------------------------------------------------------------- 4. 释义/简称
+# ---- spaces 多余空格与重复标点
+
+RE_MULTI_SPACE_CJK = re.compile(r"[\u4e00-\u9fff]  +[\u4e00-\u9fff]")
+RE_DUP_CN_PUNCT = re.compile(r"([。，；：？！、])\1+")
+RE_DUP_HALF_PUNCT = re.compile(r"[,.;:!?]{2,}")
+RE_PUNCT_MIX = re.compile(r"。\.|\.。|，,|,，|；;|::")
+
+
+def check_spaces(items):
+    issues = []
+    for i, (kind, info) in enumerate(items):
+        t = info["text"]
+        if not t:
+            continue
+        for m in RE_MULTI_SPACE_CJK.finditer(t):
+            ctx_l = max(0, m.start() - 10)
+            issues.append(Issue(
+                "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
+                f"「…{t[ctx_l:m.end() + 10]}…」", m.group(0),
+                "中文之间出现连续空格", "删除多余空格", "HIGH"))
+        for m in RE_DUP_CN_PUNCT.finditer(t):
+            ctx_l = max(0, m.start() - 10)
+            issues.append(Issue(
+                "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
+                f"「…{t[ctx_l:m.end() + 10]}…」", m.group(0),
+                f"全角标点重复：「{m.group(0)}」", "去重标点", "HIGH"))
+        for m in RE_PUNCT_MIX.finditer(t):
+            ctx_l = max(0, m.start() - 10)
+            issues.append(Issue(
+                "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
+                f"「…{t[ctx_l:m.end() + 10]}…」", m.group(0),
+                "中英标点混排", "按语境保留一个并统一全半角", "HIGH"))
+        for m in RE_DUP_HALF_PUNCT.finditer(t):
+            if re.fullmatch(r"\.{3}|…+", m.group(0)):
+                continue  # 省略号
+            ctx_l = max(0, m.start() - 10)
+            issues.append(Issue(
+                "spaces", "多余空格/标点", "正文" + f"#{i + 1}" +
+                f"「…{t[ctx_l:m.end() + 10]}…」", m.group(0),
+                "连续半角标点重复", "修正标点", "MEDIUM"))
+    return issues
+
+
+# ---- abbr 释义简称
 
 ABBR_DEF_RE = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9][\u4e00-\u9fffA-Za-z0-9·]{1,39}"
@@ -380,7 +472,7 @@ ABBR_DEF_RE = re.compile(
 
 def check_abbr(doc_text):
     issues = []
-    defs = {}       # 简称 -> [(全称, 出现位置offset)]
+    defs = {}
     quote_styles = Counter()
     for m in ABBR_DEF_RE.finditer(doc_text):
         full, short = m.group(1).strip(), m.group(2).strip()
@@ -389,73 +481,161 @@ def check_abbr(doc_text):
         if qm:
             quote_styles[qm.group(1)] += 1
 
-    # 同一简称对应不同全称
+    # 同名简称多全称 → 冲突
     for short, pairs in sorted(defs.items()):
         uniq = sorted({p[0] for p in pairs})
         if len(uniq) > 1:
-            first_loc = f"偏移{pairs[0][1]}"
-            issues.append(Issue("释义简称", f"简称「{short}」（{first_loc} 起）",
-                                " / ".join(uniq[:4]),
-                                f"同名简称对应 {len(uniq)} 个不同全称", "请核实是否存在指向冲突"))
-        # 定义之后全称复用
-        defined_at = min(p[1] for p in pairs) + len(pairs[0][0])
+            issues.append(Issue(
+                "abbr", "释义简称", f"简称「{short}」（偏移{pairs[0][1]} 起）",
+                " / ".join(uniq[:4]),
+                f"同名简称对应 {len(uniq)} 个不同全称，存在指向冲突风险",
+                "请核实区分口径或更换简称", "MEDIUM"))
+
+        defined_at = min(p[1] for p in pairs)
         full_name = pairs[0][0]
-        later_count = doc_text.count(full_name, defined_at)
+
+        # 定义前使用（问题级）
+        pre_count = doc_text.count(short, 0, defined_at)
+        if pre_count > 0:
+            issues.append(Issue(
+                "abbr", "释义简称", f"简称「{short}」首次定义前",
+                short, f"首次定义之前已独立使用 {pre_count} 次",
+                "投行惯例简称应在首次全称处即时定义，请核实前置出现是否需补定义或改写",
+                "MEDIUM"))
+
+        # 定义后全称复用 ≥3（提示级）
+        later_count = doc_text.count(full_name, defined_at + len(pairs[0][0]))
         if later_count >= 3:
             tail = doc_text.find(full_name, defined_at)
-            issues.append(Issue("释义简称", f"定义「{short}」之后（约偏移{tail}）",
-                                full_name,
-                                f"已定义简称，其后仍以全称出现 {later_count} 次",
-                                f"建议统一切换为简称「{short}」"))
+            issues.append(Issue(
+                "abbr", "释义简称", f"约偏移{tail}", full_name,
+                f"已定义简称后仍以全称出现 {later_count} 次",
+                f"建议统一切换为简称「{short}」", "LOW"))
 
-    # 定义前使用（2026-08-27 裁定：简称须先定义后使用）
-    for short, pairs in sorted(defs.items()):
-        first_def_at = min(p[1] for p in pairs)
-        pre_count = doc_text.count(short, 0, first_def_at)
-        if pre_count > 0:
-            issues.append(Issue("释义简称", f"简称「{short}」首次定义前",
-                                short,
-                                f"首次定义（约偏移{first_def_at}）之前已独立出现 {pre_count} 次",
-                                "投行惯例简称应在首次全称处即时定义，请核实前置出现是否需要补定义或改写"))
-
-    # 疑似未定义简称：括号内纯中文短语，未被「以下简称」定义，但在正文高频独立复用
+    # 未定义使用的疑似简称：括号内纯中文短语，未定义但正文独立复用 ≥2 次（提示级）
     PAREN_SHORT_RE = re.compile(r"[（(]([\u4e00-\u9fff]{2,8})[）)]")
     PAREN_SKIP = {"以下简称", "转回", "转销", "续上表", "承上表"}
-    PAREN_KEYWORD_EXCLUDE = ("万元", "亿元", "年度", "期间", "所得税", "情况")
+    KEYWORD_EXCLUDE = ("万元", "亿元", "年度", "期间", "所得税", "情况")
     paren_counts = Counter()
     for m in PAREN_SHORT_RE.finditer(doc_text):
         phrase = m.group(1)
         if phrase in PAREN_SKIP or phrase in defs:
             continue
-        if any(k in phrase for k in PAREN_KEYWORD_EXCLUDE):
+        if any(k in phrase for k in KEYWORD_EXCLUDE):
             continue
         paren_counts[phrase] += 1
     for phrase, pc in paren_counts.most_common():
-        reuse = doc_text.count(phrase) - pc  # 括号外独立复用次数
+        reuse = doc_text.count(phrase) - pc
         if pc >= 1 and reuse >= 2:
-            issues.append(Issue("释义简称", "全文",
-                                phrase,
-                                f"括号注释短语「{phrase}」（{pc} 处）在正文中独立复用 {reuse} 次，未见「以下简称」定义",
-                                "若作为简称使用，建议补充规范定义（如「XXX（以下简称『" + phrase + "』）」）；若非简称可忽略", hint=True))
+            issues.append(Issue(
+                "abbr", "释义简称", "全文", phrase,
+                f"括号注释短语「{phrase}」（{pc} 处）在正文独立复用 {reuse} 次，未见「以下简称」定义——疑似未定义简称",
+                "若作为简称请补规范定义；若非简称可忽略", "LOW"))
 
-    # 引号风格混用
     if len(quote_styles) > 1:
-        issues.append(Issue("释义简称", "全文",
-                            "、".join(f"{k}×{v}" for k, v in quote_styles.most_common()),
-                            "「以下简称」引号风格不统一", "建议全文统一引号风格"))
+        issues.append(Issue(
+            "abbr", "释义简称", "全文",
+            "、".join(f"{k}×{v}" for k, v in quote_styles.most_common()),
+            "「以下简称」引号风格不统一", "建议全文统一引号风格", "LOW"))
     return issues
 
 
-# ---------------------------------------------------------------- 5. 中英文标点
+# ---- geo 国家/城市表述合规（外部清单驱动）
 
-CJK = r"\u4e00-\u9fff"
+def load_geo_rules(geo_file):
+    if geo_file and os.path.isfile(geo_file):
+        try:
+            with open(geo_file, encoding="utf-8") as f:
+                data = json.load(f)
+            return [g for g in data if isinstance(g, dict) and g.get("term")]
+        except Exception as e:
+            print(f"[WARN] 敏感词清单读取失败({geo_file}): {e}")
+    return []
+
+
+def check_geo(doc_text, geo_rules):
+    issues = []
+    for rule in geo_rules or []:
+        term = str(rule.get("term", "")).strip()
+        if not term:
+            continue
+        total = len(re.findall(re.escape(term), doc_text))
+        if total == 0:
+            continue
+        first = doc_text.find(term)
+        ctx_l = max(0, first - 12)
+        snippet = doc_text[ctx_l:first + len(term) + 12].replace("\n", "")
+        issues.append(Issue(
+            "geo", "国家/地区表述合规", f"首次出现于「…{snippet[:28]}…」", term,
+            f"命中敏感表述清单（全文出现 {total} 次）：{rule.get('note', '')}".rstrip("："),
+            rule.get("suggestion", "请按监管口径核实并规范表述"), "HIGH"))
+    return issues
+
+
+# ---- amounts 金额千分位两位小数（豁免 % 与文号/编码）
+
+RE_NO_THOUSANDS = re.compile(r"(?<![\d,.%])(\d{5,9})(?=元|万元|亿元|[^\d]|$)")
+RE_BAD_DECIMALS = re.compile(r"\d{1,3}(?:,\d{3})+\.(\d)(?![\d%])")
+DOC_CODE_RE = re.compile(r"^\d{6,8}$")
+
+
+def _is_percent_after(text, end):
+    return text[end:].lstrip(" ").startswith("%")
+
+
+def check_amounts(items):
+    issues = []
+    seen = set()
+    for i, (kind, info) in enumerate(items):
+        text = info["text"]
+        if not text:
+            continue
+        work = re.sub(r"\d+(?:[,.]\d+)*\s*%",
+                      lambda mm: "%" * len(mm.group(0)), text)
+        where = ("表格" + f"表{info['table_no']}") if kind == "cell" else (f"正文#{i + 1}")
+
+        for m in RE_NO_THOUSANDS.finditer(work):
+            frag = m.group(0)
+            key = (where, frag, m.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            if DOC_CODE_RE.match(frag):
+                continue  # 文号/编码豁免（含日期连写，由 dates 项处理）
+            note = ""
+            if len(frag) >= 8:
+                note = "（长数字串，若为文号/编码可忽略本条）"
+            ctx_l = max(0, m.start() - 12)
+            snippet = text[ctx_l:m.end() + 10].replace("\n", "")
+            issues.append(Issue(
+                "amounts", "金额数字（千分位/两位小数）", where + f"「…{snippet[:26]}…」",
+                frag, "位数较多的数字未加千分位分隔符" + note, "添加千分位并核对是否需保留两位小数",
+                "MEDIUM"))
+
+        for m in RE_BAD_DECIMALS.finditer(work):
+            frag_raw = text[m.start():m.end()] if m.start() < len(text) else ""
+            frag = work[m.start():m.end()]
+            key = (where, frag, m.start())
+            if key in seen:
+                continue
+            seen.add(key)
+            if _is_percent_after(text, m.end()):
+                continue  # 百分比豁免
+            ctx_l = max(0, m.start() - 12)
+            snippet = text[ctx_l:m.end() + 10].replace("\n", "")
+            issues.append(Issue(
+                "amounts", "金额数字（千分位/两位小数）", where + f"「…{snippet[:26]}…」",
+                frag, "带千分位的金额仅保留一位小数", "补齐至两位小数（如 .50）", "MEDIUM"))
+    return issues
+
+
+# ---- punctuation 中英文标点（前后字符判定法）
 
 HALF_PUNCTS = ",.;:?!()\"'"
 FULL_PUNCTS = "，。；：？！（）"
 
 
 def _char_class(c):
-    """C=中文；E=英文字母/数字；O=其他。"""
     if c and "\u4e00" <= c <= "\u9fff":
         return "C"
     if c and c.isascii() and (c.isalpha() or c.isdigit()):
@@ -464,7 +644,6 @@ def _char_class(c):
 
 
 def _neighbor_class(s, k, direction):
-    """取位置 k 前/后第一个非空白字符的类别；越界返回 None。"""
     if direction < 0:
         rng = range(k - 1, -1, -1)
     else:
@@ -476,273 +655,498 @@ def _neighbor_class(s, k, direction):
     return None, None
 
 
+FULL_HALF_MAP = {"，": ",", "。": ".", "；": ";", "：": ":",
+                 "？": "?", "！": "!", "（": "(", "）": ")"}
+HALF_FULL_MAP = {",": "，", ".": "。", ";": "；", ":": "：",
+                 "?": "？", "!": "！", "(": "（", ")": "）"}
+
+
 def check_punctuation(items):
     """标点规则（按前后字符类型判定）：
-    - 半角标点 [,.;:?!()] 的相邻非空字符任一侧为中文 → 应为全角；
-    - 全角标点 [，。；：？！] 相邻非空字符两侧均为英文/数字 → 应为半角；
-    - 其余间隔场景默认中文标点，不报。
-    引号直排形态单独提示。"""
+    - 半角标点的相邻非空字符任一侧为中文 → 应为全角；
+    - 全角标点两侧均为英文/数字 → 应为半角；
+    - 其余间隔场景默认中文标点不报。
+    中文语境直排引号单独提示。"""
     issues = []
     half_set = set(HALF_PUNCTS)
     full_set = set(FULL_PUNCTS)
 
-    def add(kind, i, extra, s, start, end, problem, suggestion):
+    def add(kind, i, info, s, start, end, problem, suggestion, severity="HIGH"):
         ctx_l = max(0, start - 10)
         snippet = s[ctx_l:end + 10].replace("\n", "")
-        loc = ("表格" if kind == "cell" else "正文") + \
-              (f"表{extra}" if kind == "cell" else f"第{i + 1}段") + f"「…{snippet[:24]}…」"
-        issues.append(Issue("中英标点", loc, s[start:end], problem, suggestion))
+        loc = ("表格" + f"表{info['table_no']}" if kind == "cell"
+               else f"正文#{i + 1}") + f"「…{snippet[:24]}…」"
+        issues.append(Issue("punctuation", "中英文标点", loc,
+                            s[start:end], problem, suggestion, severity))
 
-    for i, (kind, text, extra) in enumerate(items):
-        if not text:
+    for i, (kind, info) in enumerate(items):
+        t = info["text"]
+        if not t:
             continue
-        # 规则一：半角标点任一侧为中文 → 应全角
-        for k, ch in enumerate(text):
+        for k, ch in enumerate(t):
             if ch in half_set:
-                pc, _pj = _neighbor_class(text, k, -1)
-                nc, _nj = _neighbor_class(text, k, 1)
+                pc, _pj = _neighbor_class(t, k, -1)
+                nc, _nj = _neighbor_class(t, k, 1)
                 if pc == "C" or nc == "C":
-                    problem = f"中文语境使用半角标点「{ch}」"
-                    full_map = {",": "，", ".": "。", ";": "；", ":": "：",
-                                "?": "？", "!": "！", "(": "（", ")": "）", "\"": "“”"}
-                    suggestion = f"改为全角「{full_map.get(ch, '对应全角标点')}」"
-                    add(kind, i, extra, text, k, k + 1, problem, suggestion)
-
-        # 规则二：全角标点两侧均为英文/数字 → 应半角
-        for k, ch in enumerate(text):
-            if ch in full_set:
-                pc, pj = _neighbor_class(text, k, -1)
-                nc, nj = _neighbor_class(text, k, 1)
+                    add(kind, i, info, t, k, k + 1,
+                        f"中文语境使用半角标点「{ch}」",
+                        f"改为全角「{HALF_FULL_MAP.get(ch, '对应全角标点')}」")
+            elif ch in full_set:
+                pc, _pj = _neighbor_class(t, k, -1)
+                nc, _nj = _neighbor_class(t, k, 1)
                 if pc == "E" and nc == "E":
-                    half_map = {"，": ",", "。": ".", "；": ";", "：": ":",
-                                "？": "?", "！": "!", "（": "(", "）": ")"}
-                    problem = f"英文/数字之间误用全角标点「{ch}」"
-                    suggestion = f"改为半角「{half_map.get(ch, ',')}」"
-                    add(kind, i, extra, text, k, k + 1, problem, suggestion)
+                    add(kind, i, info, t, k, k + 1,
+                        f"英文/数字之间误用全角标点「{ch}」",
+                        f"改为半角「{FULL_HALF_MAP.get(ch, ',')}」")
 
         # 提示级：中文语境直排双引号
-        dq = re.compile(r'"')
-        hits = list(dq.finditer(text))
-        cn_near = any(
-            (_char_class(text[m.start() - 1]) == "C") if m.start() > 0 else False
-            for m in hits
-        )
-        if hits and cn_near:
-            add(kind, i, extra, text, hits[0].start(), hits[0].end(),
-                f"中文语境使用直排引号 \" （共 {len(hits)} 处）", "建议改用「」或全角弯引号“”")
+        dq_hits = [m.start() for m in re.finditer(r'"', t)]
+        cn_near = any((_char_class(t[pos - 1]) == "C") if pos > 0 else False
+                      for pos in dq_hits)
+        if dq_hits and cn_near:
+            add(kind, i, info, t, dq_hits[0], dq_hits[0] + 1,
+                f"中文语境使用直排引号 \" （共 {len(dq_hits)} 处）",
+                "建议改用「」或全角弯引号“”", "LOW")
     return issues
 
 
-# ---------------------------------------------------------------- 6. 表格填写
+# ---- consistency 数值前后一致（同名指标不同值）
 
-NA_TOKENS = ["—", "－", "-", "/", "N/A", "N.A.", "不适用", "无"]
+METRIC_VAL_RE = re.compile(
+    r"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9（）]{1,19}?(?:营业收入|净利润|净利总额|归母净利润|总资产|总负债|净资产|所有者权益|货币资金|应收账款|存货|总股本|股本))"
+    r"[^\d\-]{0,6}(-?[\d,]+\.[\d]{2}|-?\d{4,}(?:,\d{3})*(?:\.\d+)?)\s*(万元|亿元|元|万|%)")
 
 
-def check_tables(doc):
+def check_consistency(items):
+    metrics = {}
     issues = []
-    stats = []
-    for tn, tbl in enumerate(TBL_RE.finditer(doc), 1):
-        tbl_xml = tbl.group(0)
-        rows = re.findall(r"<w:tr\b[^>]*>.*?</w:tr>", tbl_xml, re.S)
-        empty_cells = 0
-        space_cells = 0
+    for i, (kind, info) in enumerate(items):
+        t = info["text"]
+        if not t:
+            continue
+        for m in METRIC_VAL_RE.finditer(t):
+            name, val, unit = m.group(1), m.group(2), m.group(3)
+            # 千分位去掉再比较数值；保持展示为原文片段
+            norm_val = val.replace(",", "").rstrip(".")
+            try:
+                fv = float(norm_val)
+                if unit == "万元":
+                    fv *= 10000
+                elif unit == "亿元":
+                    fv *= 100000000
+            except ValueError:
+                continue
+            key = name[-14:]
+            metrics.setdefault((key, unit), []).append(
+                {"pos": i, "raw": m.group(0)[:40], "val": fv})
+    for (name_key, unit), records in metrics.items():
+        uniq_vals = {round(r["val"], 4) for r in records}
+        if len(uniq_vals) > 1:
+            vals_disp = " / ".join(str(r["val"]) + unit for r in records[:6])
+            positions = ", ".join(f"#{r['pos'] + 1}段" for r in records[:6])
+            issues.append(Issue(
+                "consistency", "指标数值前后一致",
+                f"指标「{name_key}」（单位{unit}，出现于 {positions}）",
+                vals_disp,
+                f"同名指标在不同位置数值不同（共 {len(records)} 处、{len(uniq_vals)} 个不同取值），疑似前后不一致——可能是口径差异，请人工核实",
+                "核实口径一致后统一数值，或在表述中明确口径差异", "MEDIUM"))
+    return issues
+
+
+# ---- calc 表格合计行求和 / 占比列合计≈100%
+
+def _to_num(s):
+    s = s.replace(",", "").replace("%", "").strip().rstrip("。")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def check_calc(tables):
+    issues = []
+    for tbl in tables:
+        no = tbl["no"]
+        rows = tbl["rows"]
+        texts = [[c["text"] for c in row] for row in rows]
+
+        # (a) 合计行求和校验
+        for ri, trow in enumerate(texts):
+            if any(("合计" in c) or ("总计" in c) for c in trow if isinstance(c, str)):
+                vals_in_row = [_to_num(c) for c in trow]
+                numeric_cols = [ci for ci, v in enumerate(vals_in_row)
+                                if v is not None and ri > 0 and c_ok_text(trow, ci)]
+                continue_ = False
+                del numeric_cols, vals_in_row
+                # 采用「其余数据行的列和 vs 合计行该列」的方法
+                header_rows = 1 if ri > 0 else 0
+                data_rows = [trow2 for ri2, trow2 in enumerate(texts) if ri2 != ri and ri2 >= header_rows]
+                bad_cols = []
+                checked_cols = 0
+                n_data = len(data_rows)
+                if n_data < 2:
+                    continue_
+                for ci in range(len(trow)):
+                    col_total = _to_num(trow[ci])
+                    if col_total is None:
+                        continue
+                    parts = []
+                    ok = True
+                    for drow in data_rows:
+                        if ci >= len(drow):
+                            ok = False
+                            break
+                        pv = _to_num(drow[ci])
+                        if pv is None:
+                            ok = False
+                            break
+                        parts.append(pv)
+                    if not ok or not parts:
+                        continue
+                    checked_cols += 1
+                    s = round(sum(parts), 4)
+                    tol = max(0.02, abs(col_total) * 0.001)
+                    if abs(s - col_total) > tol:
+                        bad_cols.append((ci, s, col_total))
+                if checked_cols and bad_cols:
+                    ci, s, tot = bad_cols[0]
+                    issues.append(Issue(
+                        "calc", "表格合计与占比计算校验",
+                        f"表{no} 合计行（第{ri + 1}行）第{ci + 1}列",
+                        f"分项之和 {s:g} ≠ 合计值 {tot:g}",
+                        "疑似计算错误或分项有遗漏（容差已计入四舍五入），请人工复核",
+                        "HIGH" == "HIGH" and "重新计算合计或补充分项" or "", "HIGH"))
+                # continue 占位避免误用
+                del continue_
+
+        # (b) 占比列合计 ≈100%
+        ncols = max((len(r) for r in texts), default=0)
+        for ci in range(ncols):
+            pct_vals = []
+            has_header = False
+            for ri, trow in enumerate(texts):
+                if ci >= len(trow):
+                    pct_vals.append(None)
+                    continue
+                txt = trow[ci].strip()
+                if any(k in txt for k in ("比例", "占比", "%")):
+                    has_header = True
+                v = _to_num(txt)
+                if "%" in txt or (txt.endswith("%")):
+                    v = _to_num(txt.replace("%", ""))
+                    pct_vals.append(v if v is None else v)
+                    continue
+                if "占比" in (texts[0][ci] if texts and ci < len(texts[0]) else ""):
+                    pct_vals.append(v)
+                else:
+                    pct_vals.append(None)
+            nums = [v for v in pct_vals if v is not None]
+            if has_header and len(nums) >= 3:
+                ssum = round(sum(nums), 2)
+                if abs(ssum - 100.0) > 1.0:
+                    issues.append(Issue(
+                        "calc", "表格合计与占比计算校验",
+                        f"表{no} 第{ci + 1}列（占比列）",
+                        f"占比合计 {ssum:g}% ≠ 100%（±1%）",
+                        "疑似占比计算错误或有遗漏项，请人工复核", "HIGH"))
+    return issues
+
+
+def c_ok_text(row, ci):
+    try:
+        return isinstance(row[ci], str) and bool(row[ci].strip()) and \
+            not any(k in row[ci] for k in ("单位", "注"))
+    except Exception:
+        return False
+
+
+# ---- cross_table 同名科目跨表数值比对
+
+def check_cross_table(tables):
+    first_col_values = {}
+    for tbl in tables:
+        seen_in_this_table = set()
+        for row in tbl["rows"]:
+            if not row:
+                continue
+            key = row[0]["text"]
+            if not key or key in seen_in_this_table:
+                continue
+            seen_in_this_table.add(key)
+            vals = tuple(_to_num(c["text"]) for c in row[1:])
+            first_col_values.setdefault(key, []).append((tbl["no"], vals))
+
+    issues = []
+    for key, occurrences in sorted(first_col_values.items()):
+        distinct = {(vals) for _, vals in occurrences if all(v is not None for v in vals)}
+        tables_involved = [no for no, _ in occurrences]
+        if len(distinct) > 1 and len(tables_involved) > 1:
+            disp = " / ".join(str(list(v))[:60] for _, v in occurrences[:4])
+            issues.append(Issue(
+                "cross_table", "跨表同名科目勾稽", f"科目「{key}」出现在表 {'、'.join('表'+str(n) for n in tables_involved)}",
+                f"各行数值不一致：{disp}",
+                "疑似勾稽关系差异——可能是口径/期间不同属正常，请人工核实", "MEDIUM"))
+    return issues
+
+
+# ---- table_* 表格类
+
+FONT_OK_SIZES = {21, 18}   # 半点值：21 = 10.5pt 五号；18 = 9pt 小五
+
+
+def check_table_font(tables):
+    issues = []
+    for tbl in tables:
+        bad_by_size = Counter()
+        example = None
+        for ri, row in enumerate(tbl["rows"]):
+            for ci, cell in enumerate(row):
+                if not cell["text"]:
+                    continue
+                for sz in cell["sizes"]:
+                    if sz in FONT_OK_SIZES:
+                        continue
+                    pt = sz / 2
+                    bad_by_size[f"{pt:g}pt(sz={sz})"] += 1
+                    if example is None:
+                        example = (ri + 1, ci + 1, cell["text"][:16], f"{pt:g}pt")
+        if bad_by_size:
+            detail = "、".join(f"{k}×{v}" for k, v in bad_by_size.most_common())
+            ex_txt = (f"，如 行{example[0]} 列{example[1]}「{example[2]}」为 {example[3]}"
+                      if example else "")
+            issues.append(Issue(
+                "table_font", "表格字号体系", f"表{tbl['no']}",
+                detail,
+                "IPO 表格字号应统一为五号（10.5pt）；放不下可用小五（9pt）" + ex_txt,
+                "将违规字号调整为五号或小五", "HIGH"))
+    return issues
+
+
+def _is_numeric_like(cell):
+    t = cell["text"]
+    if not t:
+        return False
+    core = re.sub(r"[（）()\u4e00-\u9fff]", "", t)
+    return bool(re.fullmatch(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d{4,}(?:\.\d+)?", core))
+
+
+def check_table_align(tables):
+    issues = []
+    examples = Counter()
+    sample_cell = None
+    for tbl in tables:
+        for ri, row in enumerate(tbl["rows"]):
+            for ci, cell in enumerate(row):
+                if ci == 0 or not _is_numeric_like(cell):
+                    continue
+                non_right = [p for p in cell["paras"]
+                             if p["align"] not in ("right", None)]
+                if non_right:
+                    examples[(tbl["no"],)] += 1
+                    if sample_cell is None:
+                        sample_cell = (tbl["no"], ri + 1, ci + 1, cell["text"][:16])
+    if examples:
+        detail = "、".join(f"表{k}×{v}" for k, v in examples.most_common())
+        sc = (f"，如 表{sample_cell[0]} 行{sample_cell[1]} 列{sample_cell[2]}"
+              f"「{sample_cell[3]}」") if sample_cell else ""
+        issues.append(Issue(
+            "table_align", "表格数字右对齐", detail + sc,
+            "部分数字单元格未右对齐",
+            "表格内会计数字建议右对齐（参考 check_content 的规则来源：rules.md 表格 v2）", "MEDIUM"))
+    return issues
+
+
+def check_table_empty(tables):
+    issues = []
+    for tbl in tables:
+        empty_rows = Counter()
+        for ri, row in enumerate(tbl["rows"]):
+            for ci, cell in enumerate(row):
+                if cell["text"] == "":
+                    empty_rows[(ri + 1)] += 1
+        if empty_rows:
+            total = sum(empty_rows.values())
+            detail = "、".join(f"行{r}×{c}" for r, c in sorted(empty_rows.items()))
+            issues.append(Issue(
+                "table_empty", "表格填写（提示）", f"表{tbl['no']}：{detail}",
+                f"空单元格共 {total} 个",
+                "如为无内容建议统一以「—」填充；确属留白可忽略", "LOW"))
+    return issues
+
+
+NA_TOKENS_GROUPS = {
+    "长破折号": ["—"],
+    "短横线": ["-", "－"],
+    "斜杠": ["/"],
+    "文字类": ["不适用", "N/A", "N.A.", "无"],
+}
+
+
+def check_table_na(tables):
+    issues = []
+    for tbl in tables:
         na_counter = Counter()
-        total_cells = 0
-        for row in rows:
-            cells = CELL_RE.findall(row)
-            for c in cells:
-                t = _text_of(c).strip()
-                total_cells += 1
-                raw_inner = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", c))
-                if t == "":
-                    empty_cells += 1
-                elif raw_inner != raw_inner.strip():
-                    space_cells += 1
-                if t in NA_TOKENS:
+        for row in tbl["rows"]:
+            for cell in row:
+                t = cell["text"]
+                if t in [tok for toks in NA_TOKENS_GROUPS.values() for tok in toks]:
                     na_counter[t] += 1
-        notes = []
-        if empty_cells:
-            notes.append(f"空单元格 {empty_cells} 个")
-        if empty_cells:
-            # 2026-08-27 裁定：空单元格属提示级，不计入问题
-            issues.append(Issue("表格填写", f"表{tn}", "",
-                                f"空单元格 {empty_cells} 个",
-                                "如为「无内容」建议统一以「—」等符号填充；确属留白可忽略", hint=True))
-        if space_cells:
-            issues.append(Issue("表格填写", f"表{tn}", "",
-                                f"{space_cells} 个单元格文本带首尾空格", "建议去除首尾空格"))
-        used_na = {k: v for k, v in na_counter.items()}
-        distinct_na = list(used_na.keys())
-        if len(distinct_na) > 1:
-            groups = {"长破折号": ["—"], "短横线": ["-", "－"], "斜杠": ["/"], "文字类": ["不适用", "N/A", "N.A.", "无"]}
+        distinct = list(na_counter.keys())
+        if len(distinct) > 1:
             merged = {}
-            for gname, tokens in groups.items():
-                c = sum(v for k, v in used_na.items() if k in tokens)
+            for gname, tokens in NA_TOKENS_GROUPS.items():
+                used = [k for k in distinct if k in tokens]
+                c = sum(v for k, v in na_counter.items() if k in tokens)
                 if c:
-                    merged[gname] = (c, [k for k in distinct_na if k in tokens])
+                    merged[gname] = (c, used)
             if len(merged) > 1:
-                issues.append(Issue("表格填写", f"表{tn}",
-                                    "、".join(f"{g}{'/'.join(tk)}×{c}" for g, (c, tk) in merged.items()),
-                                    "「不适用/无内容」标记符号在同一表内不统一",
-                                    "建议全表统一一种标记（通常「—」或「不适用」）"))
-        if notes:
-            stats.append((tn, notes))
-        elif total_cells:
-            note_txt = f"共 {total_cells} 单元格"
-            if empty_cells:
-                note_txt += f"，含空单元格 {empty_cells} 个（提示级）"
-            stats.append((tn, [note_txt + "，未见填写问题"]))
-    return issues, stats
+                detail = "、".join(f"{g}{'/'.join(tk)}×{c}" for g, (c, tk) in merged.items())
+                issues.append(Issue(
+                    "table_na", "表格填写（标记统一性）", f"表{tbl['no']}", detail,
+                    "同一表内「不适用/无内容」标记符号混用",
+                    "建议全表统一一种标记（通常「—」或「不适用」）", "MEDIUM"))
+    return issues
 
 
-# ---------------------------------------------------------------- 主流程
+# ---------------------------------------------------------------- 登记 & 主流程
+
+CHECK_REGISTRY = [
+    {"id": "heading_seq", "group": "text", "name": "标题层级序号连续性（跳号/重号/倒退）", "severity": "HIGH"},
+    {"id": "terms", "group": "text", "name": "用词规范性（错别字/异形词）", "severity": "MEDIUM"},
+    {"id": "dates", "group": "text", "name": "日期写法统一（十种形式识别）", "severity": "MEDIUM"},
+    {"id": "spaces", "group": "text", "name": "多余空格与重复标点", "severity": "HIGH"},
+    {"id": "punctuation", "group": "text", "name": "中英文标点（前后字符判定）", "severity": "HIGH"},
+    {"id": "abbr", "group": "text", "name": "释义简称统一（含未定义使用检出）", "severity": "MEDIUM"},
+    {"id": "geo", "group": "text", "name": "国家/城市表述合规（外部清单）", "severity": "HIGH"},
+    {"id": "amounts", "group": "data", "name": "金额千分位与两位小数", "severity": "MEDIUM"},
+    {"id": "consistency", "group": "data", "name": "指标数值前后一致", "severity": "MEDIUM"},
+    {"id": "calc", "group": "data", "name": "表格合计与占比计算校验", "severity": "HIGH"},
+    {"id": "cross_table", "group": "data", "name": "跨表同名科目勾稽比对", "severity": "MEDIUM"},
+    {"id": "table_font", "group": "table", "name": "表格字号体系（五号/小五）", "severity": "HIGH"},
+    {"id": "table_align", "group": "table", "name": "表格数字右对齐", "severity": "MEDIUM"},
+    {"id": "table_empty", "group": "table", "name": "表格空单元格", "severity": "LOW"},
+    {"id": "table_na", "group": "table", "name": "不适用标记统一性", "severity": "MEDIUM"},
+]
+
+GROUPS = {"text": [], "data": [], "table": []}
+for _item in CHECK_REGISTRY:
+    GROUPS[_item["group"]].append(_item["id"])
+CHECK_BY_ID = {_item["id"]: _item for _item in CHECK_REGISTRY}
 
 
-def run_checks(input_path, checks=("1", "2", "3", "4", "5", "6")):
+def resolve_checks(spec):
+    """all / 组名 / 核对项 id（可混合逗号分隔）。返回有序 id 集合。"""
+    chosen = []
+    if spec in (None, "", "all"):
+        return [c["id"] for c in CHECK_REGISTRY]
+    tokens = [tk.strip() for tk in spec.split(",") if tk.strip()]
+    for tk in tokens:
+        if tk in GROUPS:
+            chosen.extend(GROUPS[tk])
+        elif tk in CHECK_BY_ID:
+            chosen.append(tk)
+        else:
+            print(f"[WARN] 未知核对项/组名: {tk}")
+    ordered = [c["id"] for c in CHECK_REGISTRY if c["id"] in set(chosen)]
+    return ordered
+
+
+def run(input_path, check_ids, geo_file=None, terms_file=None):
     xmls = load_docx(input_path)
     if not xmls:
-        print("[ERROR] 无法读取 docx")
         return None
     doc = xmls["word/document.xml"]
-    all_issues = []
-    sections = {}
+    items = extract_structure(doc)
+    tables = parse_tables(doc)
+    full_text = full_text_of(doc)
+    geo_rules = load_geo_rules(geo_file)
+    term_rules = load_external_rules(terms_file)
 
-    def do(no, title, fn):
-        if no in checks:
-            res = fn()
-            sections[f"{no}. {title}"] = res
-            all_issues.extend(res)
-
-    base = os.path.basename(input_path)
-
-    def items_all():
-        return [(k, t, x) for k, t, x in extract_structure(doc)]
-
-    if "1" in checks:
-        do("1", "标题层级序号（连续性/重号）", lambda: check_heading_sequence(items_all()))
-    if "2" in checks:
-        do("2", "金额数字（千分位/两位小数）", lambda: check_amounts(items_all()))
-    if "3" in checks:
-        do("3", "日期写法统一", lambda: check_dates(items_all()))
-    if "4" in checks:
-        full_text = "\n".join(_text_of(m.group(0)) for m in PARA_RE.finditer(doc)) + "\n" + \
-                    "\n".join(_text_of(c.group(0)) for c in CELL_RE.finditer(doc))
-        do("4", "释义/简称统一", lambda: check_abbr(full_text))
-    if "5" in checks:
-        do("5", "中英文标点", lambda: check_punctuation(items_all()))
-    if "6" in checks:
-        table_issues, table_stats = check_tables(doc)
-        sections["6. 表格填写"] = table_issues
-        for no_, notes_ in table_stats:
-            if any("问题" in nn for nn in notes_):
-                pass
-        all_issues.extend(table_issues)
-        sections["_table_stats"] = table_stats
-    return base, sections, all_issues
+    runners = {
+        "heading_seq": lambda: check_heading_seq(items),
+        "terms": lambda: check_terms(full_text, term_rules),
+        "dates": lambda: check_dates(items),
+        "spaces": lambda: check_spaces(items),
+        "punctuation": lambda: check_punctuation(items),
+        "abbr": lambda: check_abbr(full_text),
+        "geo": lambda: check_geo(full_text, geo_rules),
+        "amounts": lambda: check_amounts(items),
+        "consistency": lambda: check_consistency(items),
+        "calc": lambda: check_calc(tables),
+        "cross_table": lambda: check_cross_table(tables),
+        "table_font": lambda: check_table_font(tables),
+        "table_align": lambda: check_table_align(tables),
+        "table_empty": lambda: check_table_empty(tables),
+        "table_na": lambda: check_table_na(tables),
+    }
+    results = {}
+    for cid in check_ids:
+        results[cid] = runners[cid]() if cid in runners else []
+    return base_name(input_path), results
 
 
-def render_report(base, sections, all_issues):
-    lines = [f"# 投行基本格式核对报告", ""]
+def base_name(p):
+    return os.path.basename(p)
+
+
+def render_report(base, check_ids, results):
+    lines = ["# 投行基本格式核对报告", ""]
     lines.append(f"- **核对对象**：`{base}`")
     lines.append("- **性质**：只读核对，未对文件做任何修改")
-    lines.append("- 生成：ipo-doc-formatting `check_content.py`")
+    lines.append("- 生成：ipo-doc-formatting `check_content.py` v2")
     lines.append("")
-    lines.append("## 核对总览")
+    cnt = {s: 0 for s in SEV_ORDER}
+    by_check_sev = {}
+    for cid in check_ids:
+        for it in results[cid]:
+            cnt[it.severity] = cnt.get(it.severity, 0) + 1
+            by_check_sev.setdefault(cid, Counter())[it.severity] += 1
+
+    lines.append("## 核对总览（按严重程度）")
     lines.append("")
-    lines.append("| 核对项 | 问题 | 提示 |")
-    lines.append("|--------|------|------|")
-    total_p, total_h = 0, 0
-    for name, res in sections.items():
-        if name == "_table_stats":
+    lines.append("| 组别 | 核对项 | 错误(HIGH) | 警告(MED) | 提示(LOW) |")
+    lines.append("|------|--------|-----------|-----------|-----------|")
+    group_names = {"text": "文字类", "data": "数据类", "table": "表格类"}
+    last_group = None
+    for item in CHECK_REGISTRY:
+        cid = item["id"]
+        if cid not in results:
             continue
-        label = name.split(". ", 1)[-1]
-        n_issue = sum(1 for it in res if not it.hint)
-        n_hint = sum(1 for it in res if it.hint)
-        total_p += n_issue
-        total_h += n_hint
-        lines.append(f"| {label} | {n_issue} | {n_hint} |")
-    lines.append(f"| **合计** | **{total_p}** | **{total_h}** |")
+        glabel = group_names[item["group"]]
+        last_group = item["group"]
+        sevc = by_check_sev.get(cid, Counter())
+        lines.append(f"| {glabel} | {item['name']} | {sevc.get('HIGH', 0)} | "
+                     f"{sevc.get('MEDIUM', 0)} | {sevc.get('LOW', 0)} |")
+    lines.append(f"| **合计** | — | **{cnt.get('HIGH', 0)}** | **{cnt.get('MEDIUM', 0)}** | "
+                 f"**{cnt.get('LOW', 0)}** |")
     lines.append("")
-    lines.append("> 说明：标注「疑似/请人工确认」的条目为机器初筛结果，需人工复核定性。")
+    lines.append("> 严重程度：HIGH=错误（必须修正）；MEDIUM=警告（大概率需修正）；LOW=提示（人工酌情）。")
+    lines.append("> 标注「疑似」的条目为机器初筛结果，需人工复核定性。")
     lines.append("")
 
-    for name, res in sections.items():
-        if name == "_table_stats":
-            tlines = []
-            for tn, notes in res:
-                flagged = any("问题" in nn for nn in notes)
-                flag = " ⚠️" if flagged else " ✅"
-                tlines.append(f"- 表{tn}{flag}：" + "；".join(notes))
-            if tlines:
-                lines.append("### 表格逐表状态")
-                lines.extend(tlines)
-                lines.append("")
-            continue
-        lines.append(f"## {name}")
+    sev_block = {"HIGH": "### 🔴 错误（HIGH，须修正）",
+                 "MEDIUM": "### 🟡 警告（MEDIUM，建议修正）",
+                 "LOW": "### 🟢 提示（LOW，人工酌情）"}
+
+    for sev in SEV_ORDER:
+        block_items = [(cid, it) for cid in check_ids for it in results[cid]
+                       if it.severity == sev]
+        lines.append(sev_block[sev])
         lines.append("")
-        if not res:
-            lines.append("未发现问题。")
+        if not block_items:
+            lines.append("无。")
             lines.append("")
             continue
-        lines.append("| # | 位置 | 原文/对象 | 问题 | 建议 |")
+        lines.append("| 核对项 | 位置 | 原文/对象 | 问题 | 建议 |")
         lines.append("|---|------|----------|------|------|")
-        for idx, it in enumerate(res, 1):
-            esc = lambda s: s.replace("|", "\\|").replace("\n", " ")
-            tag = "【提示】" if it.hint else ""
-            lines.append(f"| {idx} | {esc(it.location)} | {esc(it.snippet)} | "
-                         f"{tag}{esc(it.problem)} | {esc(it.suggestion)} |")
+        esc = lambda s: s.replace("|", "\\|").replace("\n", " ")
+        block_items.sort(key=lambda x: CHECK_BY_ID.get(x[0], {}).get("name", ""))
+        for idx, (cid, it) in enumerate(block_items, 1):
+            cname = CHECK_BY_ID.get(cid, {}).get("name", cid)
+            lines.append(f"| {idx} | {cname} | {esc(it.location)} | {esc(it.snippet)} | "
+                         f"{esc(it.problem)} | {esc(it.suggestion)} |")
         lines.append("")
     return "\n".join(lines)
-
-
-def main():
-    ap = argparse.ArgumentParser(description="IPO 文档基本格式核对（只读，六大项）")
-    ap.add_argument("--input", required=True, help="docx 文件路径（支持 glob）")
-    ap.add_argument("--output", default=None, help="核对报告 md 输出路径（默认 <input>_格式核对报告.md）")
-    ap.add_argument("--checks", default="123456",
-                    help="启用哪些核对项，默认 123456：1标题序号 2金额 3日期 4释义简称 5中英标点 6表格")
-    args = ap.parse_args()
-
-    files = resolve_files(args.input)
-    if not files:
-        print(f"[ERROR] 未找到 docx: {args.input}")
-        sys.exit(1)
-
-    overall_ok = True
-    for f in files:
-        result = run_checks(f, checks=tuple(args.checks))
-        if result is None:
-            overall_ok = False
-            continue
-        base, sections, all_issues = result
-        report = render_report(base, sections, all_issues)
-        out = args.output or os.path.splitext(f)[0] + "_格式核对报告.md"
-        with open(out, "w", encoding="utf-8") as fh:
-            fh.write(report)
-        print(f"\n=== 格式核对：{os.path.basename(f)} ===")
-        tp = th = 0
-        for name, res in sections.items():
-            if name == "_table_stats":
-                continue
-            ni = sum(1 for x in res if not x.hint)
-            nh = sum(1 for x in res if x.hint)
-            tp += ni; th += nh
-            mark = f"⚠️ 问题 {ni} / 提示 {nh}" if res else "✅"
-            print(f"  {name}: {mark}")
-        print(f"  合计：问题 {tp} 条，提示 {th} 条")
-        # 控制台输出问题明细（每项最多 8 条）
-        shown = 0
-        for it in all_issues:
-            if shown >= 24:
-                print(f"  …… 其余 {len(all_issues) - shown} 条见报告")
-                break
-            note = f"（{it.suggestion}）" if it.suggestion else ""
-            tag2 = "提示" if it.hint else "问题"
-            print(f"  [{it.check}]（{tag2}）{it.location} | {it.snippet[:30]} | {it.problem}{note}")
-            shown += 1
-        print(f"  → 报告已写入：{out}")
-
-    sys.exit(0 if overall_ok else 2)
 
 
 def resolve_files(path):
@@ -750,8 +1154,55 @@ def resolve_files(path):
         return sorted(glob.glob(os.path.join(path, "*.docx")))
     if os.path.isfile(path):
         return [path]
-    hits = glob.glob(path)
-    return hits if hits else []
+    return glob.glob(path)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="IPO 文档基本格式核对 v2（只读，不改文件）")
+    ap.add_argument("--input", required=True, help="docx 文件路径（支持 glob）")
+    ap.add_argument("--output", default=None, help="核对报告 md 输出路径（默认 <input>_格式核对报告.md）")
+    ap.add_argument("--checks", default="all",
+                    help="all 或 组名(text/data/table) 或核对项 id，可组合逗号分隔，"
+                         "如 --checks text,data 或 --checks calc,cross_table")
+    ap.add_argument("--geo-file", default=None,
+                    help="国家/城市敏感词清单 JSON：[{\"term\":\"...\",\"note\":\"...\",\"suggestion\":\"...\"}]")
+    ap.add_argument("--terms-file", default=None,
+                    help="术语规则清单 JSON 扩展：[{\"pattern\":\"...\",\"problem\":\"...\",\"suggestion\":\"...\"}]")
+    args = ap.parse_args()
+
+    files = resolve_files(args.input)
+    if not files:
+        print(f"[ERROR] 未找到 docx: {args.input}")
+        sys.exit(1)
+
+    check_ids = resolve_checks(args.checks)
+    exit_ok = True
+    for f in files:
+        result = run(f, check_ids, geo_file=args.geo_file, terms_file=args.terms_file)
+        if result is None:
+            exit_ok = False
+            continue
+        base, results = result
+        report = render_report(base, check_ids, results)
+        out = args.output or os.path.splitext(f)[0] + "_格式核对报告.md"
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(report)
+
+        summary_parts = []
+        sev_cnt = Counter()
+        for cid in check_ids:
+            for it in results[cid]:
+                sev_cnt[it.severity] += 1
+        for sev in SEV_ORDER:
+            label = SEV_LABEL[sev]
+            mark = "✅ 0" if sev_cnt.get(sev, 0) == 0 else f"⚠️ {sev_cnt[sev]}"
+            summary_parts.append(f"{label}: {mark}")
+        print(f"\n=== 格式核对：{os.path.basename(f)} ===")
+        for line_txt in summary_parts:
+            print(f"  {line_txt}")
+        print(f"  → 报告已写入：{out}")
+
+    sys.exit(0 if exit_ok else 2)
 
 
 if __name__ == "__main__":
