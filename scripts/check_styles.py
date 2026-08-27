@@ -14,6 +14,7 @@ check_styles.py — IPO 文档样式应用检查脚本（ipo-doc-formatting skil
   - 场景决定「一级样式」：招股书/报告 → 001；反馈回复 → 0011+001（监管问题黑体）。
 """
 import argparse
+import datetime
 import glob
 import os
 import re
@@ -176,6 +177,123 @@ def extract_text(docx_path):
         return None
     doc = xmls["word/document.xml"]
     return [m.group(1) for m in re.finditer(r"<w:t[^>]*>([^<]*)</w:t>", doc) if m.group(1)]
+
+
+def extract_para_texts(docx_path):
+    """提取段落级拼接文本序列（每段拼接全部 <w:t>），用于内容完整性对比。
+    与 run 结构无关：merge-runs 等 run 合并操作不影响对比结果（2026-08-27 修复：
+    原 extract_text 按 <w:t> 逐 run 对比，run 合并后误报内容被修改）。
+    过滤空段落（无文字内容）；表格内段落同样按 <w:p> 顺序提取。"""
+    xmls = load_docx(docx_path)
+    if not xmls or "word/document.xml" not in xmls:
+        return None
+    doc = xmls["word/document.xml"]
+    texts = []
+    for m in re.finditer(r"<w:p\b[^>]*>(.*?)</w:p>", doc, re.S):
+        body = m.group(1)
+        t = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body))
+        if t.strip():
+            texts.append(t)
+    return texts
+
+
+def _paras_with_xml(doc):
+    """解析 document.xml 的段落，返回 [(完整段落XML, pPr片段或None, pStyle或None, 文本)]。"""
+    out = []
+    for m in re.finditer(r"<w:p\b[^>]*>.*?</w:p>", doc, re.S):
+        body = m.group(0)
+        ppr_m = re.search(r"<w:pPr\b[^>]*>.*?</w:pPr>", body, re.S)
+        ppr = ppr_m.group(0) if ppr_m else None
+        style_m = re.search(r'<w:pStyle w:val="([^"]+)"', ppr or "")
+        style = style_m.group(1) if style_m else None
+        text = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", body)).strip()
+        out.append((body, ppr, style, text))
+    return out
+
+
+def _rebuild_para_revision(body, new_style, author, date, rev_id):
+    """把段落 body 的 pStyle 改为 new_style，并插入 w:pPrChange（快照原格式）形成 Word 修订。"""
+    ppr_m = re.search(r"<w:pPr\b[^>]*>.*?</w:pPr>", body, re.S)
+    if ppr_m:
+        old_ppr = ppr_m.group(0)
+        old_style_m = re.search(r'<w:pStyle w:val="([^"]+)"', old_ppr)
+        if old_style_m:
+            new_ppr = old_ppr[:old_style_m.start(1)] + new_style + old_ppr[old_style_m.end(1):]
+        else:
+            new_ppr = old_ppr.replace("<w:pPr", f'<w:pPr><w:pStyle w:val="{new_style}"/>', 1)
+        change = (f'<w:pPrChange w:id="{rev_id}" w:author="{author}" w:date="{date}">'
+                  f"{old_ppr}</w:pPrChange>")
+        new_ppr = new_ppr[: -len("</w:pPr>")] + change + "</w:pPr>"
+        return body[: ppr_m.start()] + new_ppr + body[ppr_m.end():]
+    new_ppr = (f'<w:pPr><w:pStyle w:val="{new_style}"/>'
+               f'<w:pPrChange w:id="{rev_id}" w:author="{author}" w:date="{date}">'
+               f"<w:pPr/></w:pPrChange></w:pPr>")
+    # 无原 pPr：把新 pPr 插入 <w:p> 开标签之后
+    open_m = re.match(r"(<w:p\b[^>]*>)", body)
+    if open_m:
+        return body[: open_m.end()] + new_ppr + body[open_m.end():]
+    return new_ppr + body
+
+
+def make_revision(orig_path, styled_path, output_path):
+    """生成 Word 修订稿（2026-08-27）：以原文档为基底，样式化文档为参照，
+    对每个样式变化段落插入 w:pPrChange 修订（格式更改），并开启 trackChanges。
+    打开后可在审阅面板看到「格式更改」修订，可接受/拒绝。"""
+    orig_xmls = load_docx(orig_path)
+    if not orig_xmls or "word/document.xml" not in orig_xmls:
+        print(f"  [ERROR] 读取原文件失败: {orig_path}")
+        return False
+    orig_doc = orig_xmls["word/document.xml"]
+    styled_doc = load_docx(styled_path).get("word/document.xml", "") if load_docx(styled_path) else ""
+
+    o_paras = _paras_with_xml(orig_doc)
+    s_paras = _paras_with_xml(styled_doc)
+    # 非空文本对齐（内容未变，只改格式）
+    o_seq = [(i, t) for i, (_, _, _, t) in enumerate(o_paras) if t]
+    s_seq = [(i, t) for i, (_, _, _, t) in enumerate(s_paras) if t]
+    if [t for _, t in o_seq] != [t for _, t in s_seq]:
+        print("  [FAIL] 文本序列不一致——内容被修改（严禁修改原文内容）")
+        return False
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rev_id = 0
+    n_changes = 0
+    for (oi, ot), (si, st) in zip(o_seq, s_seq):
+        o_style = o_paras[oi][2]
+        s_style = s_paras[si][2]
+        if o_style != s_style:
+            new_style = s_style if s_style else ""
+            rev_id += 1
+            body = o_paras[oi][0]
+            new_body = _rebuild_para_revision(body, new_style, "ipo-doc-formatting", now, rev_id)
+            orig_doc = orig_doc.replace(body, new_body, 1)
+            n_changes += 1
+
+    # 开启修订模式（settings.xml 加 trackChanges；load_docx 不含 settings，直接读 zip）
+    settings = ""
+    with zipfile.ZipFile(orig_path) as z:
+        if "word/settings.xml" in z.namelist():
+            settings = z.read("word/settings.xml").decode("utf-8")
+    if settings and "<w:trackChanges/>" not in settings and "<w:trackChanges " not in settings:
+        settings = settings.replace("</w:settings>", "<w:trackChanges/></w:settings>", 1)
+
+    # 写回新 docx（复用原文件全部部件，替换 document.xml/settings.xml）
+    try:
+        with zipfile.ZipFile(orig_path) as zin:
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.namelist():
+                    data = zin.read(item)
+                    if item == "word/document.xml":
+                        data = orig_doc.encode("utf-8")
+                    elif item == "word/settings.xml" and settings:
+                        data = settings.encode("utf-8")
+                    zout.writestr(item, data)
+    except Exception as e:
+        print(f"  [ERROR] 写出修订稿失败: {e}")
+        return False
+
+    print(f"  → 修订稿已生成：{output_path}（{n_changes} 处格式更改修订，Word 审阅可接受/拒绝）")
+    return True
 
 
 def extract_paras(docx_path):
@@ -373,15 +491,14 @@ def verify_content(docx_path, original_path):
     """内容完整性检查（只改格式、严禁修改原文内容）。
     套样式后的文本必须与原文逐字一致（含表格内文字、标点、空格、数字）。"""
     print(f"\n=== 内容完整性校验（{os.path.basename(docx_path)} vs 原文 {os.path.basename(original_path)}）===")
-    t_orig = extract_text(original_path)
-    t_new = extract_text(docx_path)
+    t_orig = extract_para_texts(original_path)
+    t_new = extract_para_texts(docx_path)
     if t_orig is None or t_new is None:
         print("  [ERROR] 文件读取失败，无法校验")
         return False
     if t_orig == t_new:
         print(f"  [PASS] 内容完整：{len(t_new)} 段文本与原文逐字一致（未增删改任何文字）")
         return True
-    # 定位首个差异
     for i, (a, b) in enumerate(zip(t_orig, t_new)):
         if a != b:
             print(f"  [FAIL] 第 {i + 1} 处文本被修改：")
@@ -407,6 +524,9 @@ def main():
                     help="序号段落核对：列出序号开头段落（（一）/1、/（1）/①）及上下文，辅助判定标题 vs 正文")
     ap.add_argument("--diff", metavar="原文.docx", default=None,
                     help="格式修改 diff：对比 --input（修正稿）与原文，生成格式问题清单（位置/原文/改成什么）+ 统计，写入 <修正稿>_格式修改清单.md")
+    ap.add_argument("--revise", metavar="原文件.docx", default=None,
+                    help="生成 Word 修订稿：以原文件为基底，将 --input（样式化结果）的格式改动转为 Word 修订（w:pPrChange 格式更改），并开启 trackChanges；输出 <原文件>_修订稿.docx（--output 可覆盖）")
+    ap.add_argument("--output", default=None, help="--revise 的输出路径（默认 <原文件>_修订稿.docx）")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -439,6 +559,19 @@ def main():
         for f in files:
             all_ok &= verify_content(f, orig_files[0])
         print(f"\n{'内容完整性全部通过 ✅' if all_ok else '内容被修改 ❌（严禁修改原文内容）'}")
+        sys.exit(0 if all_ok else 2)
+
+    if args.revise:
+        orig_files = resolve_files(args.revise)
+        if not orig_files:
+            print(f"[ERROR] 未找到原文件: {args.revise}")
+            sys.exit(1)
+        print(f"\n=== 生成 Word 修订稿（--input 为样式化结果，--revise 为原文件）===")
+        all_ok = True
+        for f in files:
+            out = args.output or os.path.splitext(orig_files[0])[0] + "_修订稿.docx"
+            all_ok &= make_revision(orig_files[0], f, out)
+        print(f"\n{'修订稿生成完成 ✅' if all_ok else '生成失败 ❌'}")
         sys.exit(0 if all_ok else 2)
 
     fn = check_template if args.mode == "template" else check_document

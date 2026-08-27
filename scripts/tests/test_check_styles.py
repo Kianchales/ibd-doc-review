@@ -25,10 +25,11 @@ NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
 
 def make_mini_docx(path, paras):
-    """paras: [(style|None, text)]，生成最小 docx（仅 document.xml + 必需部件）。"""
+    """paras: [(style|None, text)]，生成最小 docx（仅 document.xml + 必需部件）。
+    pStyle 按真实 Word 文档形态置于 w:pPr 内。"""
     body = []
     for style, text in paras:
-        pstyle = f'<w:pStyle w:val="{style}"/>' if style else ""
+        pstyle = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
         body.append(f"<w:p>{pstyle}<w:r><w:t>{text}</w:t></w:r></w:p>")
     doc = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -46,10 +47,16 @@ def make_mini_docx(path, paras):
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
         "</Relationships>"
     )
+    settings = (
+        '<?xml version="1.0"?>'
+        '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:zoom w:percent="100"/></w:settings>'
+    )
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", ct)
         z.writestr("_rels/.rels", rels)
         z.writestr("word/document.xml", doc)
+        z.writestr("word/settings.xml", settings)
 
 
 def run_check(path, scenario="反馈回复", mode="document"):
@@ -68,6 +75,13 @@ def run_verify(new_path, orig_path):
 def run_diff(new_path, orig_path):
     """格式修改 diff（2026-08-27 交付物能力：清单+统计）。"""
     cmd = [sys.executable, SCRIPT, "--input", new_path, "--diff", orig_path]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, proc.stdout
+
+
+def run_revise(styled_path, orig_path, output_path):
+    """生成 Word 修订稿（2026-08-27：w:pPrChange + trackChanges）。"""
+    cmd = [sys.executable, SCRIPT, "--input", styled_path, "--revise", orig_path, "--output", output_path]
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return proc.returncode, proc.stdout
 
@@ -243,6 +257,23 @@ class TestCheckStyles(unittest.TestCase):
         self.assertIn("## 修改明细", content)
         self.assertIn("002 二级标题", content, "清单应含新样式说明")
         os.remove(list_file)
+
+    def test_revise_generates_word_revision(self):
+        """生成 Word 修订稿：w:pPrChange 格式更改修订 + trackChanges。"""
+        orig = os.path.join(self.tmp, "rev_orig.docx")
+        styled = os.path.join(self.tmp, "rev_styled.docx")
+        out = os.path.join(self.tmp, "rev_out.docx")
+        make_mini_docx(orig, [(None, "一、收入确认政策分析"), (None, "报告期内，发行人按照准则确认收入。")])
+        make_mini_docx(styled, [("002", "一、收入确认政策分析"), ("000", "报告期内，发行人按照准则确认收入。")])
+        code, _ = run_revise(styled, orig, out)
+        self.assertEqual(code, 0, "修订稿生成应成功")
+        with zipfile.ZipFile(out) as z:
+            doc = z.read("word/document.xml").decode("utf-8")
+            settings = z.read("word/settings.xml").decode("utf-8")
+        self.assertEqual(doc.count("<w:pPrChange "), 2, "两段样式变化应有 2 处格式更改修订")
+        self.assertIn("<w:trackChanges/>", settings, "应开启修订模式")
+        self.assertIn('w:author="ipo-doc-formatting"', doc, "修订作者应标注")
+        os.remove(out)
 
 
 if __name__ == "__main__":
