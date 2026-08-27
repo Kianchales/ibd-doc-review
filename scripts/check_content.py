@@ -134,7 +134,15 @@ def parse_tables(doc):
                               "raw": "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", cxml)),
                               "sizes": sizes, "paras": paras})
             rows.append(cells)
-        tables.append({"no": tn, "rows": rows})
+        head_snips = []
+        for row in rows[:2]:
+            for c in row:
+                if c["text"]:
+                    head_snips.append(c["text"][:14])
+            if head_snips:
+                break
+        tables.append({"no": tn, "rows": rows,
+                       "head": ("｜".join(head_snips[:3])) if head_snips else ""})
     return tables
 
 
@@ -261,6 +269,9 @@ def check_heading_seq(items):
         stripped = text.strip()
         if stripped[:1] in ('"', "'", "\u201c", "\u201d", "\u300c", "\u300d") or \
            (stripped.startswith('"') and stripped.endswith('"')):
+            continue
+        # 长段落且含成对引号 → 引用条款/承诺原文，其内部序号不参与正文链
+        if len(stripped) > 80 and re.search(r'[“"\u300c][^“"\u300d]{6,}[”"\u300d]', stripped):
             continue
         parsed = parse_numbering(text)
         if not parsed:
@@ -406,9 +417,13 @@ def check_dates(items):
     issues = []
     if not counters:
         return issues
-    dominant, dom_n = counters.most_common(1)[0]
-    others = {f: c for f, c in counters.items() if f != dominant}
-    if others:
+    # 2026-08-27 裁定：中文「年月日/年月」为最正式表述，可与另一种统一格式共存——
+    # 主导判定排除中文式，其余形式内部再统一
+    excl = {"中文 年月日（2024年6月30日）", "中文 年月（2024年6月）"}
+    dom_items = [(f, c) for f, c in counters.most_common() if f not in excl]
+    dominant, dom_n = dom_items[0] if dom_items else (None, 0)
+    others = {f: c for f, c in counters.items() if f != dominant and f not in excl}
+    if dominant is not None and others:
         others_str = "、".join(f"{f}×{c}" for f, c in sorted(others.items(), key=lambda x: -x[1]))
         issues.append(Issue(
             "dates", "日期写法统一", "全文",
@@ -683,6 +698,22 @@ def check_amounts(items):
             prefix = text[max(0, m.start() - 10):m.start()]
             if re.search(r"[A-Za-z]{1,4}(?:/[A-Za-z]{1,4})?\s*$", prefix):
                 continue
+            # 地址要素豁免（2026-08-27 裁定）：…路6号105室-40627（集中办公区）等地址数字段
+            if re.search(r"[路街号室栋层弄巷门]", prefix):
+                continue
+            # 连字符/波浪线分隔的编号段豁免（如 105室-40627）
+            if prefix.rstrip()[-1:] in ("-", "—", "~"):
+                continue
+            # 编码串豁免：数字后紧跟字母（如 84025S11267R0SC）
+            after_ch = text[m.end()] if m.end() < len(text) else ""
+            if after_ch.isalpha():
+                continue
+            # # 前缀编号豁免（如 #72897）
+            if prefix.rstrip()[-1:] == "#":
+                continue
+            # 案号/文号豁免：数字后接「号」（如 民初11336号）
+            if text[m.end():m.end() + 2].lstrip().startswith("号"):
+                continue
             note = ""
             if len(frag) >= 8:
                 note = "（长数字串，若为文号/编码可忽略本条）"
@@ -856,6 +887,7 @@ def check_calc(tables):
         no = tbl["no"]
         rows = tbl["rows"]
         texts = [[c["text"] for c in row] for row in rows]
+        tbl_loc = f"表{no}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else "")
 
         # (a) 合计行求和校验（其余数据行列和 vs 合计行；×100 差异视为单位口径问题）
         for ri, trow in enumerate(texts):
@@ -907,14 +939,14 @@ def check_calc(tables):
                 ci, s, tot = unit_issue[0]
                 issues.append(Issue(
                     "calc", "表格合计与占比计算校验",
-                    f"表{no} 合计行第{ci + 1}列",
+                    f"{tbl_loc} 合计行第{ci + 1}列",
                     f"分项之和 {s:g} 为合计值 {tot:g} 的 100 倍",
                     "疑似单位/口径不一致（分项与合计数量级差异过大），请人工核实",
                     "MEDIUM"))
             for ci, s, tot in real_bad[:3]:
                 issues.append(Issue(
                     "calc", "表格合计与占比计算校验",
-                    f"表{no} 合计行（第{ri + 1}行）第{ci + 1}列",
+                    f"{tbl_loc} 合计行（第{ri + 1}行）第{ci + 1}列",
                     f"分项之和 {s:g} ≠ 合计值 {tot:g}",
                     "疑似计算错误或分项有遗漏（容差已计入四舍五入），请人工复核",
                     "重新计算合计或补充分项", "HIGH"))
@@ -946,7 +978,7 @@ def check_calc(tables):
                 if abs(ssum - 100.0) > 1.0:
                     issues.append(Issue(
                         "calc", "表格合计与占比计算校验",
-                        f"表{no} 第{ci + 1}列（占比列）",
+                        f"{tbl_loc} 第{ci + 1}列（占比列）",
                         f"占比合计 {ssum:g}% ≠ 100%（±1%）",
                         "疑似占比计算错误或有遗漏项，请人工复核", "HIGH"))
     return issues
@@ -1027,7 +1059,8 @@ def check_table_font(tables):
             ex_txt = (f"，如 行{example[0]} 列{example[1]}「{example[2]}」为 {example[3]}"
                       if example else "")
             issues.append(Issue(
-                "table_font", "表格字号体系", f"表{tbl['no']}",
+                "table_font", "表格字号体系",
+                f"表{tbl['no']}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else ""),
                 detail,
                 "IPO 表格字号应统一为五号（10.5pt）；放不下可用小五（9pt）" + ex_txt,
                 "将违规字号调整为五号或小五", "HIGH"))
@@ -1082,7 +1115,8 @@ def check_table_empty(tables):
             total = sum(empty_rows.values())
             detail = "、".join(f"行{r}×{c}" for r, c in sorted(empty_rows.items()))
             issues.append(Issue(
-                "table_empty", "表格填写（提示）", f"表{tbl['no']}：{detail}",
+                "table_empty", "表格填写（提示）",
+                f"表{tbl['no']}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else "") + f"：{detail}",
                 f"空单元格共 {total} 个",
                 "如为无内容建议统一以「—」填充；确属留白可忽略", "LOW"))
     return issues
@@ -1116,7 +1150,8 @@ def check_table_na(tables):
             if len(merged) > 1:
                 detail = "、".join(f"{g}{'/'.join(tk)}×{c}" for g, (c, tk) in merged.items())
                 issues.append(Issue(
-                    "table_na", "表格填写（标记统一性）", f"表{tbl['no']}", detail,
+                    "table_na", "表格填写（标记统一性）",
+                    f"表{tbl['no']}" + (f"（首行『{tbl['head']}』）" if tbl.get("head") else ""), detail,
                     "同一表内「不适用/无内容」标记符号混用",
                     "建议全表统一一种标记（通常「—」或「不适用」）", "MEDIUM"))
     return issues
