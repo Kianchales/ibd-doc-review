@@ -1,6 +1,6 @@
-# ipo-doc-audit
+# ibd-doc-review
 
-A 股 IPO 文档格式处理 Skill。
+A 股 IBD 投行文档质检 Skill。
 
 对 Word 文档按招股书或审核问询反馈回复的样式规范进行排版：招股书版样式涵盖报告、备忘录、尽调报告等正式文档；反馈回复版样式适用于审核问询回复与落实函回复。
 
@@ -27,10 +27,10 @@ A 股 IPO 文档格式处理 Skill。
 
 ## 安装
 
-1. 将本仓库 `ipo-doc-audit/` 目录复制到技能目录：
-   - WorkBuddy：`~/.workbuddy/skills/ipo-doc-audit/`
+1. 将本仓库 `ibd-doc-review/` 目录复制到技能目录：
+   - WorkBuddy：`~/.workbuddy/skills/ibd-doc-review/`
    - Claude Code / Codex / Cursor 等支持 skills 的平台：对应平台 skills 目录
-2. 或在终端：`git clone <仓库地址> ~/.workbuddy/skills/ipo-doc-audit`
+2. 或在终端：`git clone <仓库地址> ~/.workbuddy/skills/ibd-doc-review`
 
 > 安装后技能即自动可用，无需额外配置（校验脚本零依赖）。
 
@@ -75,12 +75,12 @@ python scripts/check_content.py --input 你的文档.docx --checks calc,geo     
 
 **自定义方式**：用 Word 打开对应模板 docx，修改样式（如把 000 正文字号改成小五、把标题颜色改成深蓝），保存后重新运行校验——输出将自动跟随新模板。样式 ID 与文档段落映射见 `references/style-map.md`。
 
-> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，模板 docx 由 GitHub 仓库提供——`git clone https://github.com/Kianchales/ipo-doc-audit` 获取完整版，或从仓库下载 `assets/templates/` 下 3 个模板 docx 放入本 skill 同目录。本仓库（GitHub 版）自带完整模板，开箱即用。
+> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，模板 docx 由 GitHub 仓库提供——`git clone https://github.com/Kianchales/ibd-doc-review` 获取完整版，或从仓库下载 `assets/templates/` 下 3 个模板 docx 放入本 skill 同目录。本仓库（GitHub 版）自带完整模板，开箱即用。
 
 ## 目录结构
 
 ```
-ipo-doc-audit/
+ibd-doc-review/
 ├── SKILL.md                    # 主文件：触发词 + 场景识别 + 工具路由 + S1-S7 流程 + 铁律 + 降级协议
 ├── README.md                   # 本文件
 ├── assets/

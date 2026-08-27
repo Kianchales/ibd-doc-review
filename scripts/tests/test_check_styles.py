@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-test_check_styles.py — ipo-doc-audit 校验脚本自测（标准流程强化）
+test_check_styles.py — ibd-doc-review 校验脚本自测（标准流程强化）
 覆盖：
   1. 合格反馈回复文档 → 通过（PASS）
   2. 不合格文档（无 pStyle）→ 失败（FAIL）
@@ -296,7 +296,7 @@ class TestCheckStyles(unittest.TestCase):
         self.assertIn("<w:trackRevisions/>", settings, "应开启修订模式（正确元素名是 w:trackRevisions，"
                       "不存在 w:trackChanges——OpenXmlValidator 实证）")
         self.assertNotIn("w:trackChanges", settings, "不得含非法元素 w:trackChanges")
-        self.assertIn('w:author="ipo-doc-audit"', doc, "修订作者应标注")
+        self.assertIn('w:author="ibd-doc-review"', doc, "修订作者应标注")
         self.assertIn("w:formatting=\"1\"", settings,
                       "应默认显示格式更改修订（revisionView formatting=1），否则 Word 打开看不见标记")
         # CT_Settings 序列（OpenXmlValidator 实证唯一合法位置）：bordersDoNotSurroundFooter

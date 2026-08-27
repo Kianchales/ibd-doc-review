@@ -1,10 +1,10 @@
 ---
-name: ipo-doc-audit
-slug: ipo-doc-audit
-displayName: 投行文档质检
-summary: A 股投行文档质检：样式规范化（招股书/反馈回复排版）+ 内容级格式核对（序号/金额/日期/标点/简称/表格），只读审查不改文件。
+name: ibd-doc-review
+slug: ibd-doc-review
+displayName: IBD 投行文档质检
+summary: A 股 IBD 投行文档质检：样式规范化（招股书/反馈回复排版）+ 内容级格式核对（序号/金额/日期/标点/简称/表格），只读审查不改文件。
 description: >
-  A 股投行文档质检 Skill，两大能力一体：
+  A 股 IBD 投行文档质检 Skill，两大能力一体：
   ① 样式规范化：对 Word 文档应用招股书（000-009）或审核问询反馈回复（0011/001）排版样式，
   报告/备忘录/尽调报告同归招股书版；模板可自定义（assets/templates/ 即样式源）。
   ② 内容级格式核对（只读，不改文件）：按「文字/数据/表格」三大组别、14 个核对项输出
@@ -18,9 +18,9 @@ description: >
 version: 0.7.1
 ---
 
-# ipo-doc-audit（投行文档质检）
+# ibd-doc-review（IBD 投行文档质检）
 
-A 股投行文档质检 Skill，两大能力一体：
+A 股 IBD 投行文档质检 Skill，两大能力一体：
 ① **样式规范化**：招股书版（000-009，含报告/备忘录/尽调报告）与反馈回复版（0011/001/000-009）两套样式体系；
 ② **内容级格式核对**（只读不改文件）：文字/数据/表格三大组别 × 14 核对项，输出 HIGH/MEDIUM/LOW 分级报告。
 样式规则以模板实证为准，集中封装模板路径、pStyle 映射、序号规则与表格规则。
@@ -44,7 +44,7 @@ A 股投行文档质检 Skill，两大能力一体：
 
 > 模板文件路径（**skill 自带，即样式源**）：`assets/templates/`（相对本 skill 目录）
 > **模板即样式源**：使用者可直接修改/替换 `assets/templates/` 下的 docx——**改模板 = 定制输出样式**，输出将跟随新模板。
-> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，分发版不含模板文件——模板经 GitHub 仓库获取：`git clone https://github.com/Kianchales/ipo-doc-audit`（完整版含 `assets/templates/` 三个模板 docx）
+> **skillhub 分发版说明**：skillhub 平台不接受 .docx/.zip 资产，分发版不含模板文件——模板经 GitHub 仓库获取：`git clone https://github.com/Kianchales/ibd-doc-review`（完整版含 `assets/templates/` 三个模板 docx）
 > 模板权威源为机构内部资产（不随分发包携带）；分发版以包内 `assets/templates/` 为使用源，样式定义以包内模板 + style-map.md/rules.md 为准。
 
 | 模板文件 | 适用文档 | 样式体系 | 关键样式 ID |
