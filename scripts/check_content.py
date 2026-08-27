@@ -223,7 +223,13 @@ def check_heading_sequence(items):
 
 RE_NO_THOUSANDS = re.compile(r"(?<![\d,.%])(\d{5,9})(?=元|万元|亿元|[^\d]|$)")
 RE_BAD_DECIMALS = re.compile(r"\d{1,3}(?:,\d{3})+\.(\d)(?![\d])")
-RE_MAYBE_DATE = re.compile(r"^(?:19|20)\d{6}$")
+RE_DOC_CODE = re.compile(r"^\d{6,8}$")  # 豁免：文号/编码类 6~8 位纯数字
+
+
+def _is_percent_after(text, end):
+    """命中片段之后（允许一个空格）紧跟百分号 → 比例，豁免。"""
+    tail = text[end:].lstrip(" ")
+    return tail.startswith("%")
 
 
 def check_amounts(items):
@@ -233,11 +239,13 @@ def check_amounts(items):
     for i, (kind, text, extra) in enumerate(items):
         if not text:
             continue
+        # 预剥离百分比片段（豁免：比例数值不作千分位/两位小数要求）
+        work_text = re.sub(r"\d+(?:[,.]\d+)*\s*%", lambda mm: "%" * len(mm.group(0)), text)
         for pat, tag, msg in (
             (RE_NO_THOUSANDS, "无千分位", "5 位以上数字未加千分位分隔符"),
             (RE_BAD_DECIMALS, "小数位不足", "带千分位的金额小数位不足两位"),
         ):
-            for m in pat.finditer(text):
+            for m in pat.finditer(work_text):
                 frag = m.group(0)
                 key = (i, frag, m.start())
                 if key in seen_positions:
@@ -247,10 +255,14 @@ def check_amounts(items):
                 ctx_l = max(0, m.start() - 14)
                 snippet = text[ctx_l:m.end() + 8]
                 note = ""
-                if tag == "无千分位" and RE_MAYBE_DATE.match(frag):
-                    note = "（形态近似 YYYYMMDD 日期，请人工确认性质；若确为日期见第 3 项核对）"
-                elif tag == "无千分位" and len(frag) >= 8:
-                    note = "（长数字串，若为文号/编码可忽略本条）"
+                if tag == "无千分位":
+                    if RE_DOC_CODE.match(frag):
+                        note = ""
+                        counter -= 1
+                        seen_positions.discard(key)
+                        continue  # 豁免：6~8 位视为文号/编码（含日期连写，由第 3 项核对处理）
+                    if len(frag) >= 8:
+                        note = "（长数字串，若为文号/编码可忽略本条）"
                 loc = ("表格" if kind == "cell" else "正文") + \
                       (f"表{extra}" if kind == "cell" else f"第{i + 1}段") + f"「…{snippet[:26]}…」"
                 issues.append(Issue("金额数字", loc, frag, msg, note))
@@ -403,57 +415,86 @@ def check_abbr(doc_text):
 
 CJK = r"\u4e00-\u9fff"
 
+HALF_PUNCTS = ",.;:?!()\"'"
+FULL_PUNCTS = "，。；：？！（）"
+
+
+def _char_class(c):
+    """C=中文；E=英文字母/数字；O=其他。"""
+    if c and "\u4e00" <= c <= "\u9fff":
+        return "C"
+    if c and c.isascii() and (c.isalpha() or c.isdigit()):
+        return "E"
+    return "O"
+
+
+def _neighbor_class(s, k, direction):
+    """取位置 k 前/后第一个非空白字符的类别；越界返回 None。"""
+    if direction < 0:
+        rng = range(k - 1, -1, -1)
+    else:
+        rng = range(k + 1, len(s))
+    for j in rng:
+        c = s[j]
+        if not c.isspace():
+            return _char_class(c), j
+    return None, None
+
 
 def check_punctuation(items):
+    """标点规则（2026-08-27 用户裁定：按前后字符类型判定）：
+    - 半角标点 [,.;:?!()] 的相邻非空字符任一侧为中文 → 应为全角；
+    - 全角标点 [，。；：？！] 相邻非空字符两侧均为英文/数字 → 应为半角；
+    - 其余间隔场景默认中文标点，不报。
+    引号直排形态单独提示。"""
     issues = []
+    half_set = set(HALF_PUNCTS)
+    full_set = set(FULL_PUNCTS)
 
-    def add(loc_kind, i, extra, seg_for_pos, s, m_start, m_end, problem, suggestion):
-        ctx_l = max(0, m_start - 10)
-        snippet = s[ctx_l:m_end + 10].replace("\n", "")
-        loc = ("表格" if loc_kind == "cell" else "正文") + \
-              (f"表{extra}" if loc_kind == "cell" else f"第{i + 1}段") + f"「…{snippet[:24]}…」"
-        issues.append(Issue("中英标点", loc, s[m_start:m_end], problem, suggestion))
+    def add(kind, i, extra, s, start, end, problem, suggestion):
+        ctx_l = max(0, start - 10)
+        snippet = s[ctx_l:end + 10].replace("\n", "")
+        loc = ("表格" if kind == "cell" else "正文") + \
+              (f"表{extra}" if kind == "cell" else f"第{i + 1}段") + f"「…{snippet[:24]}…」"
+        issues.append(Issue("中英标点", loc, s[start:end], problem, suggestion))
 
-    rules = [
-        # (pattern, problem, suggestion, validator)
-        (re.compile(rf"[{CJK}](?P<p>[,;:?!])"), "中文语句后使用半角标点",
-         "改为对应全角：，；：？！", None),
-        (re.compile(rf"[{CJK}]\.(?=[^\d$€£¥])"), "中文语句后使用半角句点",
-         "改为全角句号。（数字/编号/单位除外，已尽量排除）", None),
-        (re.compile(rf"[{CJK}]\("), "中文内容使用半角左括号", "改为全角（", None),
-        (re.compile(rf"\)[{CJK}]"), "半角右括号后接中文", "改为全角）", None),
-        (re.compile(r"[A-Za-z](?P<p>[，。；：？！])"), "英文单词后接全角标点",
-         "若为纯英文语段建议半角 , . ; : ? !", None),
-        (re.compile(rf"[{CJK}]{{1}}\"\s"), "中文语境直排双引号", "建议「」或全角弯引号“”", None),
-    ]
     for i, (kind, text, extra) in enumerate(items):
         if not text:
             continue
-        for pat, problem, suggestion, _v in rules:
-            for m in pat.finditer(text):
-                start, end = m.span()
-                s_txt = text[start:end]
-                # 排除常见合法情形
-                if pat.pattern.endswith("(?=[^\\d$€£¥])"):
-                    before = text[max(0, start - 1):start]
-                    after = text[end:end + 2]
-                    if re.match(r"\d", text[end + 1:end + 2] or "") :
-                        continue
-                    if re.search(r"\d$", before or ""):
-                        continue
-                add(kind, i, extra, "", text, start, end, problem, suggestion)
+        # 规则一：半角标点任一侧为中文 → 应全角
+        for k, ch in enumerate(text):
+            if ch in half_set:
+                pc, _pj = _neighbor_class(text, k, -1)
+                nc, _nj = _neighbor_class(text, k, 1)
+                if pc == "C" or nc == "C":
+                    problem = f"中文语境使用半角标点「{ch}」"
+                    full_map = {",": "，", ".": "。", ";": "；", ":": "：",
+                                "?": "？", "!": "！", "(": "（", ")": "）", "\"": "“”"}
+                    suggestion = f"改为全角「{full_map.get(ch, '对应全角标点')}」"
+                    add(kind, i, extra, text, k, k + 1, problem, suggestion)
 
-    # 括号配对风格粗查：同一段内出现两种括号包裹中文
-    pair_re = re.compile(rf"([{CJK}])\(([^)]{{1,40}})\)|\(([^)]{{1,40}})\)([{CJK}])")
-    for i, (kind, text, extra) in enumerate(items):
-        if not text:
-            continue
-        cnt = 0
-        for m in pair_re.finditer(text):
-            cnt += 1
-            if cnt <= 5:
-                add(kind, i, extra, "", text, m.start(), m.end(),
-                    "疑为括号全半角混用（中文语境建议全角（））", "")
+        # 规则二：全角标点两侧均为英文/数字 → 应半角
+        for k, ch in enumerate(text):
+            if ch in full_set:
+                pc, pj = _neighbor_class(text, k, -1)
+                nc, nj = _neighbor_class(text, k, 1)
+                if pc == "E" and nc == "E":
+                    half_map = {"，": ",", "。": ".", "；": ";", "：": ":",
+                                "？": "?", "！": "!", "（": "(", "）": ")"}
+                    problem = f"英文/数字之间误用全角标点「{ch}」"
+                    suggestion = f"改为半角「{half_map.get(ch, ',')}」"
+                    add(kind, i, extra, text, k, k + 1, problem, suggestion)
+
+        # 提示级：中文语境直排双引号
+        dq = re.compile(r'"')
+        hits = list(dq.finditer(text))
+        cn_near = any(
+            (_char_class(text[m.start() - 1]) == "C") if m.start() > 0 else False
+            for m in hits
+        )
+        if hits and cn_near:
+            add(kind, i, extra, text, hits[0].start(), hits[0].end(),
+                f"中文语境使用直排引号 \" （共 {len(hits)} 处）", "建议改用「」或全角弯引号“”")
     return issues
 
 

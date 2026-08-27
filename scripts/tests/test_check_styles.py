@@ -355,6 +355,39 @@ class TestCheckStyles(unittest.TestCase):
         self.assertIn("12345", out, "5 位以上数字未加千分位应检出")
         self.assertIn("110,200.5", out, "一位小数金额应检出")
 
+    def test_content_amount_exemptions(self):
+        """格式核对豁免：比例%、文号/编码不报；仅真实金额检出。"""
+        path = os.path.join(self.tmp, "exempt.docx")
+        make_mini_docx(path, [
+            ("000", "比例合计100%；证券代码123456；文号20260001；金额为12345.6万元。"),
+        ])
+        code, out = run_content(path, checks="2")
+        self.assertEqual(code, 0, f"核对应正常完成，输出:\n{out}")
+        self.assertIn("12345", out, "真实金额应检出")
+        # 豁免项不应作为「问题对象」出现在明细表/明细行中
+        for exempt in ("| 20260001 |", "| 123456 |", "| 100 |"):
+            self.assertNotIn(exempt, out, f"{exempt} 应豁免（比例%/文号/编码）")
+
+    def test_content_punctuation_neighbor_rule(self):
+        """标点前后字符判定法：中文语境半角必报；英文/数字间半角不报；英英间全角报。"""
+        bad_path = os.path.join(self.tmp, "punct_bad.docx")
+        good_path = os.path.join(self.tmp, "punct_good.docx")
+        make_mini_docx(bad_path, [
+            ("000", "XX股份有限公司(以下简称「发行人」)成立，持有ABC，DEF股权?"),
+        ])
+        make_mini_docx(good_path, [
+            ("000", "报告期为2023年1月1日（即12个月），收入1,234.56万元（占比5%）。"),
+            ("000", "The Company held 1,200 shares as of Jun 30."),
+        ])
+        _, out_bad = run_content(bad_path, checks="5")
+        _, out_good = run_content(good_path, checks="5")
+        self.assertIn("中文语境使用半角标点", out_bad, "中文语境半角 ( , ? 应检出")
+        self.assertIn("全角", out_bad, "ABC，DEF 英英间全角逗号应检出")
+        self.assertIn("1. 标题层级序号" if False else "中英文标点: ⚠️", out_bad)
+        # 良例：数字/英文间半角与常规中文标点均不应报
+        for banned in ["中文语境使用半角标点", "误用全角"]:
+            self.assertNotIn(banned, out_good, f"规范写法不应报「{banned}」")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
