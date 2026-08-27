@@ -542,33 +542,62 @@ def check_abbr(doc_text):
 
 # ---- geo 国家/城市表述合规（外部清单驱动）
 
+SENSITIVE_TERMS_FILE = os.path.join(SKILL_DIR, "references", "sensitive_terms.json")
+LEVEL_MAP = {"CRITICAL": "HIGH", "IMPORTANT": "MEDIUM", "MINOR": "LOW"}
+
+
 def load_geo_rules(geo_file):
-    if geo_file and os.path.isfile(geo_file):
-        try:
-            with open(geo_file, encoding="utf-8") as f:
-                data = json.load(f)
-            return [g for g in data if isinstance(g, dict) and g.get("term")]
-        except Exception as e:
-            print(f"[WARN] 敏感词清单读取失败({geo_file}): {e}")
-    return []
+    """敏感词清单：默认加载 skill 内置 references/sensitive_terms.json；
+    --geo-file 提供的清单会**追加**进来。支持 [{pattern|term, level, note, suggestion}]。"""
+    rules = []
+    sources = [SENSITIVE_TERMS_FILE]
+    if geo_file and geo_file not in ("", "/dev/null"):
+        sources.insert(0, geo_file)
+    for src in sources:
+        if src and os.path.isfile(src):
+            try:
+                with open(src, encoding="utf-8") as f:
+                    data = json.load(f)
+                for g in data:
+                    if isinstance(g, dict) and (g.get("pattern") or g.get("term")):
+                        rules.append({
+                            "pattern": g.get("pattern") or re.escape(g["term"]),
+                            "level": g.get("level", "CRITICAL"),
+                            "note": g.get("note", ""),
+                            "suggestion": g.get("suggestion", ""),
+                        })
+            except Exception as e:
+                print(f"[WARN] 敏感词清单读取失败({src}): {e}")
+    return rules
 
 
 def check_geo(doc_text, geo_rules):
+    """国家/城市表述合规：清单驱动，pattern 支持 JSON 正则；CRITICAL=HIGH，
+    IMPORTANT=MEDIUM，MINOR=LOW。逐处命中报告位置与上下文。"""
     issues = []
-    for rule in geo_rules or []:
-        term = str(rule.get("term", "")).strip()
-        if not term:
+    for rule in (geo_rules or []):
+        try:
+            rx = re.compile(rule["pattern"])
+        except re.error as e:
+            print(f"[WARN] 敏感词规则编译失败({rule['pattern'][:20]}): {e}")
             continue
-        total = len(re.findall(re.escape(term), doc_text))
-        if total == 0:
+        severity = LEVEL_MAP.get(rule.get("level", "CRITICAL"), "HIGH")
+        matches = list(rx.finditer(doc_text))
+        if not matches:
             continue
-        first = doc_text.find(term)
-        ctx_l = max(0, first - 12)
-        snippet = doc_text[ctx_l:first + len(term) + 12].replace("\n", "")
-        issues.append(Issue(
-            "geo", "国家/地区表述合规", f"首次出现于「…{snippet[:28]}…」", term,
-            f"命中敏感表述清单（全文出现 {total} 次）：{rule.get('note', '')}".rstrip("："),
-            rule.get("suggestion", "请按监管口径核实并规范表述"), "HIGH"))
+        shown = 0
+        for m in matches:
+            ctx_l = max(0, m.start() - 12)
+            snippet = doc_text[ctx_l:m.end() + 14].replace("\n", "")
+            loc = f"全文（首现于「…{snippet[:30]}…」）" if shown == 0 else f"全文（第 {shown + 1} 处）"
+            issues.append(Issue(
+                "geo", "国家/地区表述合规", loc,
+                m.group(0)[:40],
+                f"{rule.get('level')}级：{rule.get('note', '')}（累计 {len(matches)} 处）".strip(),
+                rule.get("suggestion", ""), severity))
+            shown += 1
+            if shown >= 3:   # 每条规则最多列 3 处明细
+                break
     return issues
 
 
