@@ -811,6 +811,9 @@ def check_punctuation(items):
                 if pc == "C" or nc == "C":
                     if ch == "." and in_abbrev(k):
                         continue
+                    # 序号/编号/日期句点豁免（2026-08-27 裁定）：「1.公司」「2.如」「2024.6.30」
+                    if ch == "." and k > 0 and t[k - 1].isdigit():
+                        continue
                     add(kind, i, info, t, k, k + 1,
                         f"中文语境使用半角标点「{ch}」",
                         f"改为全角「{HALF_FULL_MAP.get(ch, '对应全角标点')}」")
@@ -896,6 +899,11 @@ def check_calc(tables):
             header_rows = 1 if ri > 0 else 0
             data_rows = [r2 for ri2, r2 in enumerate(texts)
                          if ri2 >= header_rows and ri2 != ri and any(c.strip() for c in r2)]
+            # 排除小计/中间汇总行（2026-08-27 裁定：小计行含数值，作分项会重复计数）
+            data_rows = [r2 for r2 in data_rows
+                         if not any(("小计" in c) or ("其中" in c) or ("减：" in c)
+                                    or ("加：" in c) or ("剔除" in c)
+                                    for c in r2 if isinstance(c, str))]
             if len(data_rows) < 2:
                 continue
             bad_cols = []
@@ -919,8 +927,7 @@ def check_calc(tables):
                     bad_cols.append((ci, s, col_total))
             if not bad_cols:
                 continue
-            # 单位口径差异识别：(i) 分项之和恰为合计值的 100 倍（小数 vs 百分数）
-            #                   (ii) 合计值 ≈100 而 分项均为大额绝对值（合计行该格实为「100%」占比）
+            # 单位口径差异识别：仅分项之和恰为合计值的 100 倍（小数 vs 百分数）时降级
             unit_issue = []
             real_bad = []
             for bc in bad_cols:
@@ -928,13 +935,7 @@ def check_calc(tables):
                 if s and abs(s - tot * 100) <= max(0.02, abs(tot * 100) * 0.001):
                     unit_issue.append(bc)   # 小数 vs 百分数 口径
                 else:
-                    data_vals = [_to_num(drow[ci]) for drow in data_rows
-                                 if ci < len(drow) and _to_num(drow[ci]) is not None]
-                    if data_vals and abs(tot - 100) <= 2 and                        sum(1 for v in data_vals if abs(v) > 500) >= max(2, len(data_vals) // 2):
-                        # 合计值≈100 实为「100%」占比标记，分项为大额绝对值
-                        unit_issue.append(bc)
-                    else:
-                        real_bad.append(bc)
+                    real_bad.append(bc)
             if unit_issue:
                 ci, s, tot = unit_issue[0]
                 issues.append(Issue(
@@ -957,6 +958,9 @@ def check_calc(tables):
             pct_vals = []
             has_header = False
             for ri, trow in enumerate(texts):
+                if any(("小计" in c) or ("其中" in c) for c in trow if isinstance(c, str)):
+                    pct_vals.append(None)
+                    continue
                 if ci >= len(trow):
                     pct_vals.append(None)
                     continue
