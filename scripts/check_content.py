@@ -430,7 +430,8 @@ def check_dates(items):
             f"主导「{dominant}」×{dom_n}；其余 {others_str}",
             f"建议全文统一为「{dominant}」，少数派明细如下", "MEDIUM"))
         for fname, lst in samples.items():
-            if fname == dominant or len(issues) > 120:
+            # 中文「X年X月X日」为最正式表述（2026-08-27 裁定），永不列入少数派
+            if fname in excl or fname == dominant or len(issues) > 120:
                 continue
             shown_loc = set()
             for (i, kind, info, t) in lst:
