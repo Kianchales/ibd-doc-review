@@ -73,6 +73,18 @@ def run_verify(new_path, orig_path):
     return proc.returncode, proc.stdout
 
 
+CONTENT_SCRIPT = os.path.join(os.path.dirname(SCRIPT), "check_content.py")
+
+
+def run_content(path, checks=None):
+    """投行格式核对（check_content.py，只读六大项）。"""
+    cmd = [sys.executable, CONTENT_SCRIPT, "--input", path]
+    if checks:
+        cmd += ["--checks", checks]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, proc.stdout
+
+
 def run_diff(new_path, orig_path):
     """格式修改 diff（2026-08-27 交付物能力：清单+统计）。"""
     cmd = [sys.executable, SCRIPT, "--input", new_path, "--diff", orig_path]
@@ -327,6 +339,21 @@ class TestCheckStyles(unittest.TestCase):
         self.assertIn('<w:pStyle w:val="002"/>', doc, "修订后段落应带新 pStyle")
         self.assertIn("<w:spacing w:line=\"360\"", doc, "原 pPr 直接格式应保留")
         os.remove(out)
+
+    def test_content_check_heading_skip_and_amount(self):
+        """格式核对（check_content.py）：标题序号跳号 + 金额千分位/两位小数检出。"""
+        path = os.path.join(self.tmp, "content.docx")
+        make_mini_docx(path, [
+            ("002", "一、发行人基本情况"),
+            ("000", "截至20260630，发行人总资产为 12345.6 万元。"),
+            ("002", "三、股权结构"),
+            ("000", "报告期内营业收入为 110,200.5万元。"),
+        ])
+        code, out = run_content(path, checks="12")
+        self.assertEqual(code, 0, f"核对应正常完成，输出:\n{out}")
+        self.assertIn("跳号", out, "「一、→ 三、」应检出跳号")
+        self.assertIn("12345", out, "5 位以上数字未加千分位应检出")
+        self.assertIn("110,200.5", out, "一位小数金额应检出")
 
 
 if __name__ == "__main__":
