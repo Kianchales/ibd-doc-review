@@ -242,46 +242,74 @@ def _disp_num(level, val):
 
 
 def check_heading_seq(items):
-    """标题层级序号连续性（层次感知）。"""
+    """标题层级序号连续性 v3：
+    - 跳过目录条目（以 1~4 位纯数字结尾 = 带页码特征的行）
+    - 同层必须递增 +1（跳号/重号/倒退报 HIGH）
+    - 进入更深层级：重新起 1；回到更高层级：沿该层自身上次值 +1 继续"""
     issues = []
     prev_li = -1
     prev_val = None
     last_at_level = {}
     seq_no = 0
+    toc_tail_re = re.compile(r"\s*[0-9]{1,4}\s*$")
     for kind, info in items:
         if kind != "body" or not info["text"]:
             continue
-        parsed = parse_numbering(info["text"])
+        text = info["text"]
+        parsed = parse_numbering(text)
         if not parsed:
+            continue
+        # 目录条目：以纯数字结尾（页码特征）
+        if toc_tail_re.search(text):
             continue
         seq_no += 1
         level, val, raw = parsed
         name = LEVEL_NAMES[level]
-        loc = f"{name}#{seq_no}「{info['text'][:20]}」"
+        loc = f"{name}#{seq_no}「{text[:22]}」"
         li = ALL_LEVELS.index(level)
-        if li == prev_li:
-            expected = (prev_val or 0) + 1
+
+        def disp(v):
+            return _disp_num(level, v) if v else str(v)
+
+        def note(expected):
+            return f"序号「{raw}」，应调整为目标「{disp(expected)}」"
+
+        problem = None
+        suggestion = ""
+        severity = "HIGH"
+
+        if prev_li == -1:
+            expected = 1
+            if val != 1:
+                problem = f"全文首个序号为「{raw}」（应为起始值 1/一）"
+        elif li == prev_li:
+            expected = prev_val + 1
             if val != expected:
-                kind_str = ("重号" if val == prev_val else
-                            "跳号" if val > expected else "倒退")
-                issues.append(Issue(
-                    "heading_seq", name, loc, info["text"][:40],
-                    f"序号「{raw}」，前一号为「{_disp_num(level, prev_val)}」，{kind_str}",
-                    f"应连续，期望「{_disp_num(level, expected)}」", "HIGH"))
+                kind_str = ("跳号" if val > expected else
+                            "重号" if val == prev_val else "倒退")
+                problem = (f"序号「{raw}」，前一号为「{_disp_num(level, prev_val)}」，{kind_str}")
+                suggestion = f"调整为「{_disp_num(level, expected)}」"
         elif li > prev_li:
-            if val != 1 and val != 0:
-                issues.append(Issue(
-                    "heading_seq", name, loc, info["text"][:40],
-                    f"降入该层级时首个序号为「{raw}」（应为起始值 1/一）", "", "HIGH"))
+            expected = 1
+            if val != 1:
+                problem = (f"进入更深层级时首个序号为「{raw}」（通常应为起始值 1/一）；"
+                           f"若本意是与上层衔接请检查上文是否缺号")
+                suggestion = f"如需延续请调整为「{_disp_num(level, expected)}」"
+                severity = "LOW"
         else:
-            last_here = last_at_level.get(level)
-            if last_here is not None and val != last_here + 1:
-                kind_str = ("重号" if val == last_here else
-                            "跳号" if val > last_here + 1 else "倒退")
-                issues.append(Issue(
-                    "heading_seq", name, loc, info["text"][:40],
-                    f"回升至该层级，序号「{raw}」，上次为「{_disp_num(level, last_here)}」，{kind_str}",
-                    f"期望「{_disp_num(level, last_here + 1)}」", "HIGH"))
+            base = last_at_level.get(level)
+            expected = (base + 1) if base is not None else 1
+            if val != expected:
+                kind_str = "跳号" if val > expected else "倒退/重号"
+                problem = (f"回到该层级时序号「{raw}」，上一次该层为"
+                           f"「{_disp_num(level, base)}」，{kind_str}——若为新小节重新起号可忽略")
+                suggestion = f"如需延续请调整为「{_disp_num(level, expected)}」"
+                severity = "LOW"
+
+        if problem:
+            issues.append(Issue(
+                "heading_seq", name, loc, text[:40], problem,
+                suggestion if suggestion else f"目标序号 {expected}", severity))
         prev_li = li
         prev_val = val
         last_at_level[level] = val
