@@ -1,20 +1,26 @@
 # ibd-doc-review
 
-A 股 IBD 投行文档质检 Skill。
+A 股 **IBD 投行文档质检** Skill，两大能力一体：
 
-对 Word 文档按招股书或审核问询反馈回复的样式规范进行排版：招股书版样式涵盖报告、备忘录、尽调报告等正式文档；反馈回复版样式适用于审核问询回复与落实函回复。
+1. **样式规范化**：对 Word 文档应用招股书（000-009）或审核问询反馈回复（0011/001）的排版样式，报告/备忘录/尽调报告等正式文档同归招股书版；模板可自定义。
+2. **内容级格式核对**（只读，不改文件）：按「文字 / 数据 / 表格」三大组别、14 个核对项输出 HIGH/MEDIUM/LOW 三级严重程度报告，适用于申报文件质量自查。
 
-样式定义全部来自模板文件实证，修改模板即可调整输出。仅处理格式，不修改文档内容。
+样式规则全部来自模板文件实证，修改模板即可调整输出。本 Skill 仅处理格式与核查，不修改文档原文内容。
 
 ## 功能特性
 
+**样式能力**
 - **两套样式体系开箱即用**：招股书版（含报告类正式文档）+ 反馈回复版，样式定义全部模板实证
 - **模板即样式源**：样式由 `assets/templates/` 下的模板 docx 定义——**修改/替换模板 = 定制输出样式**，无需改代码
 - **三场景自动路由**：已有 docx 整套套样式（apply-template）/ 新建 docx（模板基底填充）/ 局部微调（实时编辑）
-- **内置校验门禁**：`scripts/check_styles.py` 自动检查必备样式、裸段落、空段落、标题跳级、内容完整性（--verify-content）、序号段落核对（--check-numbering）
-- **三件套交付**（2026-08-27）：格式修改输出 **Word 修订稿**（--revise 基于原文件生成：w:pPrChange 格式更改修订 + trackRevisions，审阅可接受/拒绝）+ 格式问题清单（--diff 生成：位置/原文/改成什么）+ 修改统计
-- **投行基本格式核对**（2026-08-27，只读不改文件）：`scripts/check_content.py` 按「文字 / 数据 / 表格」三大组别×严重程度（HIGH/MEDIUM/LOW）组织 14 个核对项——标题序号连续性、用词规范、日期统一、多余空格与重复标点、释义简称、国家城市合规（外部清单）、金额千分位两位小数、指标数值一致、合计与占比计算、跨表勾稽、表格字号体系、数字右对齐、空单元格提示、不适用符号统一
-- **零依赖校验脚本**：两个脚本均纯 Python 标准库（zipfile/re），无需安装任何包
+- **内置校验门禁**：`scripts/check_styles.py` 检查必备样式、裸段落、空段落、标题跳级、内容完整性（--verify-content）、序号段落核对（--check-numbering）
+- **三件套交付**：格式修改输出 **Word 修订稿**（--revise：w:pPrChange 格式更改修订 + trackRevisions，审阅可接受/拒绝）+ 格式问题清单（--diff）+ 修改统计
+
+**核对能力（只读审查）**
+- **三大组别 × 14 核对项**：文字类（标题层级序号连续性、用词规范、日期写法统一、多余空格与重复标点、释义简称统一、国家/城市表述合规）＋ 数据类（金额千分位与两位小数、指标数值一致、表格合计与占比计算校验、跨表勾稽）＋ 表格类（字号体系、数字右对齐、空单元格提示、不适用符号统一）
+- **三级严重程度**：HIGH=错误（须改）/ MEDIUM=警告（大概率改）/ LOW=提示（人工酌情），报告按此分块呈现
+- **敏感词合规清单**：内置国家/地区表述三级规则（CRITICAL/IMPORTANT/MINOR），支持 `--geo-file` 追加
+- **零依赖**：两个脚本均纯 Python 标准库（zipfile/re），无需安装任何包
 
 ## 触发词
 
@@ -24,21 +30,22 @@ A 股 IBD 投行文档质检 Skill。
 | 反馈回复样式 | 「按反馈回复样式」「按问询回复格式」「反馈回复排版」「反馈回复排版规范」「问询函回复格式」「落实函格式」「审核问询回复格式」「按问询函格式排版」 |
 | 通用排版要求 | 「把这个 Word 改成 XXX 格式」「排版规范」「按投行规范排版」「字体字号统一」「排版规范一点」「文档格式统一」 |
 | 局部样式调整 | 「标题改成黑体」「正文首行缩进」「表格改成三线表」「单位行右对齐」 |
+| **格式核对（只读，不改文件）** | 「核对一下格式」「格式自查」「投行格式核对」「检查序号/金额/日期/标点」「文件质量核查」 |
 
 ## 安装
 
 1. 将本仓库 `ibd-doc-review/` 目录复制到技能目录：
    - WorkBuddy：`~/.workbuddy/skills/ibd-doc-review/`
    - Claude Code / Codex / Cursor 等支持 skills 的平台：对应平台 skills 目录
-2. 或在终端：`git clone <仓库地址> ~/.workbuddy/skills/ibd-doc-review`
+2. 或在终端：`git clone https://github.com/Kianchales/ibd-doc-review ~/.workbuddy/skills/ibd-doc-review`
 
 > 安装后技能即自动可用，无需额外配置（校验脚本零依赖）。
 
 ## 版本
 
-当前版本 **v0.7.0**（frontmatter `version` 为准；版本演进见 `CHANGELOG.md`）。想固定某个版本使用时，checkout 对应 git tag 或下载对应 Release。
+当前版本 **v0.7.2**（frontmatter `version` 为准；版本演进见 `CHANGELOG.md`）。想固定某个版本使用时，checkout 对应 git tag 或下载对应 Release。
 
-## 使用流程（S1-S7）
+## 用法一：样式应用（S1-S7 摘要）
 
 ```
 识别场景（招股书版/反馈回复版）→ 加载样式资产（assets/templates/ 下模板）
@@ -49,8 +56,6 @@ A 股 IBD 投行文档质检 Skill。
 → 交付声明
 ```
 
-校验示例：
-
 ```bash
 python scripts/check_styles.py --input 你的文档.docx --scenario 反馈回复        # 成品文档校验
 python scripts/check_styles.py --input 你的模板.docx --scenario 反馈回复 --mode template  # 样式库校验
@@ -58,10 +63,27 @@ python scripts/check_styles.py --input 套样式后.docx --verify-content 原文
 python scripts/check_styles.py --input 你的文档.docx --check-numbering          # 序号段落核对
 python scripts/check_styles.py --input 修正稿.docx --diff 原文.docx            # 格式修改清单+统计
 python scripts/check_styles.py --input 样式化结果.docx --revise 原文件.docx     # 生成 Word 修订稿（原文件+格式更改修订）
-python scripts/check_content.py --input 你的文档.docx                          # 投行格式核对（全部，只读不改文件）
-python scripts/check_content.py --input 你的文档.docx --checks text,data       # 只查文字类+数据类
-python scripts/check_content.py --input 你的文档.docx --checks calc,geo        # 只查指定子项
 ```
+
+## 用法二：格式核对（只读，不改文件）
+
+```bash
+python scripts/check_content.py --input 你的文档.docx                          # 全部核对项
+python scripts/check_content.py --input 你的文档.docx --checks text            # 只查文字类
+python scripts/check_content.py --input 你的文档.docx --checks data,table      # 数据类+表格类
+python scripts/check_content.py --input 你的文档.docx --checks calc,geo        # 指定子项
+python scripts/check_content.py --input 你的文档.docx --geo-file 追加清单.json   # 追加敏感词清单
+```
+
+**核对项一览**（按组别 × 默认严重度）：
+
+| 组别 | 核对项 | 默认 |
+|------|--------|------|
+| 文字类 | 标题层级序号连续性（跳号/重号/倒退；支持第X节/问题X 自定义编号）；用词规范（错别字/异形词）；日期写法统一（十种形式，中文年月日为最正式表述）；多余空格与重复标点；释义简称统一（含未定义使用检出）；国家/城市表述合规（内置敏感词清单） | HIGH / MED / LOW 分级 |
+| 数据类 | 金额千分位与两位小数（豁免 %、文号/编码/标准号/地址/案号）；指标数值前后一致；表格合计行求和与占比列合计≈100% 校验（排除小计行）；跨表同名科目勾稽 | 同上 |
+| 表格类 | 字号体系（五号/小五，封面提示框与签字页豁免）；数字右对齐；空单元格（汇总提示）；不适用标记统一性 | 同上 |
+
+**输出**：`<文档名>_格式核对报告.md`——核对总览矩阵（组别×严重度）+ 🔴/🟡/🟢 三级明细（核对项/位置/原文/问题/建议，表格问题附首行摘要定位）。
 
 ## 模板自定义（改模板 = 改输出样式）
 
@@ -81,7 +103,7 @@ python scripts/check_content.py --input 你的文档.docx --checks calc,geo     
 
 ```
 ibd-doc-review/
-├── SKILL.md                    # 主文件：触发词 + 场景识别 + 工具路由 + S1-S7 流程 + 铁律 + 降级协议
+├── SKILL.md                    # 主文件：触发词 + 场景识别 + 工具路由 + S1-S7 流程 + 格式核对模式 + 铁律
 ├── README.md                   # 本文件
 ├── assets/
 │   └── templates/              # 样式源模板（可自定义替换）
@@ -91,12 +113,13 @@ ibd-doc-review/
 ├── references/
 │   ├── style-map.md            # 两套样式体系完整映射表（模板实证）
 │   ├── rules.md                # 标题序号九级链 + 表格三线表 + 排版铁律
+│   ├── sensitive_terms.json    # 国家/地区敏感词合规清单（三级正则规则）
 │   └── examples.md             # 典型用例（触发→执行→产出 全链路）
 └── scripts/
     ├── check_styles.py         # 样式校验脚本（纯标准库零依赖）
-    ├── check_content.py        # 投行格式核对脚本：三大组别 14 项内容级核对（只读不改文件）
+    ├── check_content.py        # 格式核对脚本：三大组别 14 项内容级核对（只读不改文件）
     └── tests/
-        └── test_check_styles.py # 校验脚本自测（14 用例）
+        └── test_check_styles.py # 校验脚本自测（18 用例）
 ```
 
 ## 样式体系速览
