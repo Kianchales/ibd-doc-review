@@ -1279,7 +1279,7 @@ def render_report(base, check_ids, results):
     lines = ["# 投行基本格式核对报告", ""]
     lines.append(f"- **核对对象**：`{base}`")
     lines.append("- **性质**：只读核对，未对文件做任何修改")
-    lines.append("- 生成：ipo-doc-formatting `check_content.py` v2")
+    lines.append("- 生成：ipo-doc-audit `check_content.py` v2")
     lines.append("")
     cnt = {s: 0 for s in SEV_ORDER}
     by_check_sev = {}

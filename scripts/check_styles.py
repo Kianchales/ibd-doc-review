@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-check_styles.py — IPO 文档样式应用检查脚本（ipo-doc-formatting skill 附带）
+check_styles.py — IPO 文档样式应用检查脚本（ipo-doc-audit skill 附带）
 功能：
   - 成品文档模式（默认）：统计 docx 中 pStyle 使用分布，校验必备样式、裸段落、空段落（段落间禁止空行）、标题跳级。
   - 模板/样式库模式（--mode template）：校验 styles.xml 中 000-009 / 0011+001 / a4-a6 样式定义完整性。
@@ -272,7 +272,7 @@ def make_revision(orig_path, styled_path, output_path):
             new_style = s_style if s_style else ""
             rev_id += 1
             body = o_paras[oi][0]
-            new_body = _rebuild_para_revision(body, new_style, "ipo-doc-formatting", now, rev_id)
+            new_body = _rebuild_para_revision(body, new_style, "ipo-doc-audit", now, rev_id)
             orig_doc = orig_doc.replace(body, new_body, 1)
             n_changes += 1
 
@@ -425,7 +425,7 @@ def cmd_diff(new_path, orig_path):
     lines = ["# 格式修改清单", ""]
     lines.append(f"- **修正稿**：`{os.path.basename(new_path)}`")
     lines.append(f"- **原文**：`{os.path.basename(orig_path)}`")
-    lines.append(f"- 生成：ipo-doc-formatting `check_styles.py --diff`（只改格式，不改内容）")
+    lines.append(f"- 生成：ipo-doc-audit `check_styles.py --diff`（只改格式，不改内容）")
     lines.append("")
     lines.append("## 修改统计")
     lines.append("")
